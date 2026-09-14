@@ -1,6 +1,5 @@
 import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
-import { HttpModule } from '@nestjs/axios';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { CredentialsModule } from '../credentials/credentials.module';
 import { AuthController } from './auth.controller';
@@ -10,10 +9,13 @@ import { USER_ROLE_CLIENT } from './user-role-client.interface';
 import { HttpUserRoleClient } from './clients/http-user-role.client';
 import { CredentialsController } from '../credentials/credentials.controller';
 
+/**
+ * No HttpModule import — HttpUserRoleClient injects InternalHttpClient
+ * (§9.4), provided globally by TenantContextModule, not raw HttpService.
+ */
 @Module({
   imports: [
     CredentialsModule,
-    HttpModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],

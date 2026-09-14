@@ -643,6 +643,28 @@ This keeps the system's isolation-bypass story to exactly one shape everywhere: 
 valid, non-expired HMAC signature is rejected, full stop — whether or not that signature happens to
 assert an identity.
 
+**Who signs a *service-initiated* internal call.** §9.2's matrix lists several service-to-service
+calls (`tenant-service` → `auth-service`, `auth-service` → `user-service`, and more as later
+services are built) that are not the gateway forwarding a client request — one service is calling
+another directly. Those calls are signed by `libs/tenant-context`'s `InternalHttpClient`, the single
+wrapper every internal HTTP client in every service uses instead of raw `HttpService`:
+
+- If the calling service currently has an open `AsyncLocalStorage` tenant-context scope (it is
+  itself in the middle of handling a request), `InternalHttpClient` **propagates that context
+  forward** — same `userId`/`organizationId`/`roles`, same `correlationId` — so a call chain
+  correlates end to end under one trace id (§26.2) and carries the same identity the whole way.
+- If no scope is open — a background job, or a call made *before* any identity exists yet (e.g.
+  `tenant-service`'s onboarding saga calling `auth-service` to create the credential that will
+  become an identity) — `InternalHttpClient` signs an **anonymous context**, the identical mechanism
+  described above for the gateway's three `@Public()` routes.
+
+Either way, the receiving service's `InternalContextGuard` verifies the same signature the same way.
+A client that calls `HttpService` (or raw `axios`) directly, bypassing `InternalHttpClient`, sends
+an unsigned request that every other service's guard correctly rejects with `401` — this was caught
+as a real defect during `user-service`'s implementation (§32.3) and fixed by making
+`InternalHttpClient` the only way to make one of these calls, not by each call site remembering to
+sign.
+
 ---
 
 ## 10. API Gateway
@@ -1151,8 +1173,15 @@ graded; database-per-service is not.
 **What is preserved despite sharing.** The boundary is still real:
 
 - Each service has its **own TypeORM `DataSource`**, its own entities, its own migration directory.
-- Each connects with a **role granted only its own schema**, plus a single narrowly-scoped grant:
-  `user-service`'s role has `SELECT`/`UPDATE` on `subs.subscriptions` **and nothing else** in `subs`.
+- Every service in the whole system — not only user-service and subscription-service — connects as
+  the **same single database role**, `app_user` (§13.5, §22.1). That role's isolation-relevant
+  property is `NOSUPERUSER`/`NOBYPASSRLS` (so RLS cannot be bypassed by any service, §13.8 check #2)
+  — it is not that each service gets its own distinct role. The boundary between `user-service` and
+  `subscription-service` is enforced by **grant scope, applied per-table, per-migration**, not by
+  separate credentials: `app_user`'s access to `subs.subscriptions` is `SELECT`/`UPDATE` **and
+  nothing else** in `subs`, granted explicitly by user-service's own migration (never a blanket
+  `ALTER DEFAULT PRIVILEGES ... IN SCHEMA subs`, which would hand user-service's connection full CRUD
+  on every table subscription-service ever creates there).
 - That grant exists for the **seat-enforcement transactions in §19, and only those**. They are
   enumerated in §19.4: invite, accept, revoke, remove, expire, and the downgrade check. Every one
   locks the same subscription row; together they maintain the `used_seats` invariant. Any *other*
@@ -2568,6 +2597,56 @@ they are not silently forgotten once the services that close them are built.
   `JwtStrategy` are already built — §16.2 use #2 — but nothing calls `deny()` yet, since the gateway
   itself is not built). Close this when `api-gateway`'s logout route is implemented: it must call
   `RedisTokenDenylist.deny(jti, remainingTtl)` before or alongside forwarding to `auth-service`.
+
+**Migration sequencing for `core_db` (§14.2), decided during `user-service`'s implementation.**
+`subs.subscriptions` is created by `user-service`'s own migration — minimally shaped with only the
+columns the §19 seat lock needs (`organization_id`, `used_seats`, `max_seats_snapshot`, and the
+`CHECK` constraint) — because `subscription-service` does not exist yet and `user-service`'s
+concurrency tests (T3) need a real `subs.subscriptions` row to lock against real PostgreSQL, not a
+mock. When `subscription-service` is built, its own migration **extends** the same table with an
+`ALTER TABLE` adding the columns it owns (`plan_id`, `status`, `used_storage_bytes`,
+`max_storage_snapshot`, `current_period_end`, `version`) — never drops or recreates it. Two services
+each migrating the same physical table is unusual, but it is the direct, honest consequence of the
+shared-database decision §14.2 already made; the alternative (a throwaway table replaced later)
+would declare the table's real owner twice and disrupt local dev data for no benefit.
+
+### 32.4 Implementation-phase defects caught and fixed
+
+Unlike §32.3's open gaps, these were real defects introduced during implementation and closed
+before the affected service was committed. Recorded because the same mistake is exactly the kind a
+later service could reintroduce if the reason it was wrong is forgotten.
+
+- **Service-to-service HTTP calls were being sent unsigned.** `tenant-service`'s `HttpAuthClient`/
+  `HttpSubscriptionClient` and an early draft of `auth-service`'s `HttpUserRoleClient` called
+  `HttpService` directly, with no `x-internal-context`/`x-internal-signature` headers at all. Every
+  one of these calls would have been rejected with `401` by the receiving service's
+  `InternalContextGuard` at actual runtime — invisible to unit tests, which mock the client
+  interface rather than exercising real HTTP. Fixed by introducing `InternalHttpClient` (§9.4) as
+  the one wrapper every internal client must use, and retrofitting all three existing clients to it.
+  The lesson generalises: a defect in the *wire format* between two services is exactly the class of
+  bug that passes both `tsc` and a unit-test suite while being completely broken, which is why an
+  end-to-end integration test exercising real HTTP between two running services belongs in the test
+  plan before this system is considered complete (§28.1's Testcontainers approach extends naturally
+  to spinning up two services and a real HTTP call between them, not just one service and a
+  database).
+- **An early draft of `AuthController` marked `/auth/login` and `/auth/refresh` as `@Public()`.**
+  This would have caused `auth-service`'s own `InternalContextGuard` to skip signature verification
+  entirely for those routes — the exact bypass the anonymous-context mechanism (§9.4) exists to
+  avoid needing. Caught and removed before any review ran, while implementing the anonymous-context
+  decision itself; recorded here because the instinct to reach for `@Public()` on a route with no
+  identity yet is natural and will recur.
+- **`enableTenantRls()`'s table-name quoting broke on schema-qualified tables.** The helper wrapped
+  an entire `"schema.table"` string in one pair of quotes, producing a single invalid identifier
+  rather than a schema-qualified reference. Every table created so far had used a bare name
+  (`organizations`, `credentials`), so this passed unnoticed until `user-service`'s `users.users` —
+  the first schema-qualified tenant table — required it. Fixed by quoting each dot-separated segment
+  independently. A migration using this helper for a schema-qualified table is exactly the case a
+  reviewer should re-verify by hand until an automated migration-apply test exists.
+- **`core_db`'s init script granted `app_user` blanket CRUD on every future table in the `subs`
+  schema**, via `ALTER DEFAULT PRIVILEGES ... IN SCHEMA subs ...`, rather than the narrow
+  `SELECT`/`UPDATE` on `subs.subscriptions` alone that §14.2 promises. Fixed by removing the
+  schema-wide default-privilege grant and applying the one specific table grant from
+  `user-service`'s own migration instead, where it is reviewable next to the table it names.
 
 ---
 

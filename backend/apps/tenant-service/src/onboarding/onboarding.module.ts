@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { HttpModule } from '@nestjs/axios';
 import { OrganizationsModule } from '../organizations/organizations.module';
 import { OnboardingController } from './onboarding.controller';
 import { OnboardingService } from './onboarding.service';
@@ -9,8 +8,13 @@ import { SUBSCRIPTION_CLIENT } from './subscription-client.interface';
 import { HttpAuthClient } from './clients/http-auth.client';
 import { HttpSubscriptionClient } from './clients/http-subscription.client';
 
+/**
+ * No HttpModule import here — HttpAuthClient/HttpSubscriptionClient inject
+ * InternalHttpClient (§9.4), provided globally by TenantContextModule, not
+ * raw HttpService.
+ */
 @Module({
-  imports: [HttpModule, OrganizationsModule],
+  imports: [OrganizationsModule],
   controllers: [OnboardingController],
   providers: [
     OnboardingService,

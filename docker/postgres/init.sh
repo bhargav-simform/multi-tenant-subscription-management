@@ -58,9 +58,12 @@ EOSQL
 
 # core_db: two schemas, one per service, plus this init grants the schema-level
 # access both services need. The ONE additional cross-schema TABLE grant that
-# makes the §19 seat-enforcement transaction possible (user-service reading
-# subs.subscriptions) is applied by subscription-service's own migration, once
-# that table exists — not here, so it stays reviewable as an explicit, dated change.
+# makes the §19 seat-enforcement transaction possible — app_user's SELECT/UPDATE
+# on subs.subscriptions — is applied by user-service's own migration (it is the
+# one that creates the table and the one that needs the grant; see
+# docs/architecture/ARCHITECTURE.md §32.3 "Migration sequencing for core_db"),
+# not here, so it stays reviewable as an explicit, dated change alongside the
+# table it applies to.
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname core_db <<-EOSQL
   CREATE SCHEMA IF NOT EXISTS users AUTHORIZATION app_migrator;
   CREATE SCHEMA IF NOT EXISTS subs  AUTHORIZATION app_migrator;
@@ -70,9 +73,13 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname core_db <<-EOSQL
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_user;
   ALTER DEFAULT PRIVILEGES FOR ROLE app_migrator IN SCHEMA users
     GRANT USAGE, SELECT ON SEQUENCES TO app_user;
-  ALTER DEFAULT PRIVILEGES FOR ROLE app_migrator IN SCHEMA subs
-    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_user;
-  ALTER DEFAULT PRIVILEGES FOR ROLE app_migrator IN SCHEMA subs
-    GRANT USAGE, SELECT ON SEQUENCES TO app_user;
   REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+  -- NO "ALTER DEFAULT PRIVILEGES ... IN SCHEMA subs ..." here, deliberately.
+  -- §14.2: app_user (user-service's runtime role, also connecting to core_db)
+  -- gets SELECT/UPDATE on subs.subscriptions ONLY — never blanket CRUD on
+  -- every table subscription-service will ever create in subs. That one
+  -- narrow grant is applied by user-service's own migration, on the one
+  -- table it names explicitly (see CreateUsersAndInvitations migration).
+  -- subscription-service's runtime role gets its own full grants on subs,
+  -- applied when subscription-service's migration/init runs.
 EOSQL
