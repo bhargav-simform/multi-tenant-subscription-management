@@ -1,0 +1,35 @@
+/** @type {import('jest').Config} */
+module.exports = {
+  moduleFileExtensions: ['js', 'json', 'ts'],
+  rootDir: '.',
+  testRegex: '.*\\.spec\\.ts$',
+  extensionsToTreatAsEsm: ['.ts'],
+  transform: {
+    '^.+\\.(t|j)s$': [
+      'ts-jest',
+      { tsconfig: '<rootDir>/tsconfig.jest.json', useESM: true },
+    ],
+  },
+  moduleNameMapper: {
+    '^@app/common$': '<rootDir>/libs/common/src',
+    '^@app/common/(.*)$': '<rootDir>/libs/common/src/$1',
+    '^@app/tenant-context$': '<rootDir>/libs/tenant-context/src',
+    '^@app/tenant-context/(.*)$': '<rootDir>/libs/tenant-context/src/$1',
+    '^@app/database$': '<rootDir>/libs/database/src',
+    '^@app/database/(.*)$': '<rootDir>/libs/database/src/$1',
+    '^@app/auth$': '<rootDir>/libs/auth/src',
+    '^@app/auth/(.*)$': '<rootDir>/libs/auth/src/$1',
+    '^@app/authorization$': '<rootDir>/libs/authorization/src',
+    '^@app/authorization/(.*)$': '<rootDir>/libs/authorization/src/$1',
+    '^@app/kafka$': '<rootDir>/libs/kafka/src',
+    '^@app/kafka/(.*)$': '<rootDir>/libs/kafka/src/$1',
+    '^@app/redis$': '<rootDir>/libs/redis/src',
+    '^@app/redis/(.*)$': '<rootDir>/libs/redis/src/$1',
+    '^@app/logging$': '<rootDir>/libs/logging/src',
+    '^@app/logging/(.*)$': '<rootDir>/libs/logging/src/$1',
+    '^(\\.{1,2}/.*)\\.js$': '$1',
+  },
+  collectCoverageFrom: ['apps/**/*.(t|j)s', 'libs/**/*.(t|j)s'],
+  coveragePathIgnorePatterns: ['<rootDir>/node_modules/', '.spec.ts$', '.entity.ts$'],
+  testEnvironment: 'node',
+};

@@ -80,8 +80,15 @@ CREATE INDEX idx_widgets_org_created ON widgets (organization_id, created_at DES
 
 ### 3. Register in `TENANT_TABLES`
 
-Add to the tenant-table list consumed by the §13.8 CI check. A table in neither
-`GLOBAL_TABLES` nor `TENANT_TABLES` fails the build, by design.
+Add to the tenant-table list consumed by the §13.8 CI check. A table in none of
+`GLOBAL_TABLES`, `REGISTRY_TABLES`, or `TENANT_TABLES` fails the build, by design.
+
+`REGISTRY_TABLES` (`organizations`, `onboarding_sagas`) is a third, narrow category:
+the tenant registry itself, not tenant content — deliberately NOT RLS-protected
+because a platform admin legitimately reads them directly (§13.6). Only add a table
+here if it IS the registry/orchestration layer itself. Never add a table here
+because scoping it felt inconvenient — that is exactly the mistake this registry
+exists to catch.
 
 ### 4. Repository extends `TenantRepository`
 

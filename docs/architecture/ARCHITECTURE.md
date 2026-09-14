@@ -1040,7 +1040,7 @@ Honest enumeration. Each has a mitigation.
 | 4 | Open a connection outside `TenantAwareDataSource` | `app.current_org` unset → policy false → **zero rows**. Fails loudly rather than leaking | Integration test asserting an unwrapped connection reads nothing |
 | 5 | Connect as superuser / table owner | **This one would leak** | `app_user` is non-superuser, non-owner, `NOBYPASSRLS`. Compose and migrations create it that way; a startup assertion verifies it |
 | 6 | Read `orgId` from a request body or param | Would let a caller name another tenant | Code review + a lint rule banning `orgId` in DTOs; no route in the API design accepts one |
-| 7 | Join to a non-RLS table that holds tenant data | Possible if a lookup table is misclassified | §13.8 classification test: every table is explicitly global or tenant-owned |
+| 7 | Join to a non-RLS table that holds tenant data | Possible if a lookup table is misclassified | §13.8 classification test: every table is explicitly global, registry, or tenant-owned |
 | 8 | Kafka consumer processes an event without a tenant scope | Consumers run outside a request | Base consumer class opens ALS from the event envelope before the handler runs; no handler receives a raw payload |
 
 Rows 3 and 5 are the two genuine holes. Both are closed by automated checks rather than by review
@@ -1057,8 +1057,12 @@ Four checks, runnable in CI:
    has no `BYPASSRLS`. Refuse to boot otherwise — a misconfigured deployment fails closed.
 3. **Careless-query test.** A repository method with no tenant filter, plus a raw-SQL variant.
    Seeded with two orgs' data, asserted to return only the current tenant's rows.
-4. **Table classification test.** Every table appears in exactly one of two explicit lists —
-   `GLOBAL_TABLES` (`plans`, migrations) or `TENANT_TABLES`. A new table in neither fails the build.
+4. **Table classification test.** Every table appears in exactly one of three explicit lists —
+   `GLOBAL_TABLES` (`plans`, migrations), `REGISTRY_TABLES` (`organizations`,
+   `onboarding_sagas` — the tenant registry itself, not tenant content; deliberately
+   not RLS-protected because a platform admin legitimately reads them directly for
+   the org list, §13.6), or `TENANT_TABLES`. A new table in none of the three fails
+   the build.
 
 ### 13.9 Cross-tenant attempt detection
 

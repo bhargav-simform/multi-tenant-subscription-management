@@ -8,6 +8,17 @@
  */
 export const GLOBAL_TABLES = ['plans'] as const;
 
+/**
+ * The tenant REGISTRY, not tenant CONTENT (§8.3). Deliberately not RLS-protected —
+ * a platform admin legitimately reads these directly for the org list (§13.6), and
+ * RLS would block that legitimate read. This is what makes "platform admin sees
+ * orgs but not content" structural: these are the only two tables a platform
+ * admin's queries ever touch, and neither can hold organisation content by
+ * definition (§8.3's schema). A table belongs here ONLY if it is part of the
+ * registry/orchestration layer itself — never for "it's inconvenient to scope".
+ */
+export const REGISTRY_TABLES = ['organizations', 'onboarding_sagas'] as const;
+
 export const TENANT_TABLES = [
   'users',
   'invitations',
@@ -20,4 +31,5 @@ export const TENANT_TABLES = [
 ] as const;
 
 export type GlobalTable = (typeof GLOBAL_TABLES)[number];
+export type RegistryTable = (typeof REGISTRY_TABLES)[number];
 export type TenantTable = (typeof TENANT_TABLES)[number];
