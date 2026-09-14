@@ -1,0 +1,42 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git status)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git branch*)",
+      "Bash(git show*)",
+      "Bash(pnpm lint*)",
+      "Bash(pnpm test*)",
+      "Bash(pnpm build*)",
+      "Bash(pnpm typecheck*)",
+      "Bash(pnpm format:check*)",
+      "Bash(pnpm --filter * lint*)",
+      "Bash(pnpm --filter * test*)",
+      "Bash(pnpm --filter * build*)",
+      "Bash(pnpm typeorm migration:show*)",
+      "Bash(docker compose ps*)",
+      "Bash(docker compose logs*)",
+      "Bash(docker compose config*)"
+    ],
+    "deny": [
+      "Read(.env)",
+      "Read(**/.env)",
+      "Edit(.env)",
+      "Edit(**/.env)",
+      "Bash(npm install*)",
+      "Bash(npm i *)",
+      "Bash(yarn add*)",
+      "Bash(pnpm add prisma*)",
+      "Bash(pnpm add @prisma/*)",
+      "Bash(pnpm add sequelize*)",
+      "Bash(pnpm add drizzle-orm*)",
+      "Bash(pnpm add mongoose*)",
+      "Bash(pnpm typeorm migration:revert*)",
+      "Bash(pnpm typeorm schema:drop*)",
+      "Bash(docker compose down -v*)",
+      "Bash(git push --force*)",
+      "Bash(git reset --hard*)"
+    ]
+  }
+}
