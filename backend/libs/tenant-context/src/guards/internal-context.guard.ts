@@ -15,6 +15,19 @@ import { InternalContextSigner } from '../store/internal-context.signer';
 import { IS_PUBLIC_KEY } from './public.decorator';
 
 /**
+ * §26.4/§27.3: exact paths exempted from signature verification because Docker
+ * Compose's healthcheck prober cannot produce a signed internal context. This
+ * is a HARDCODED PATH exemption, not a decorator any route can opt into — a
+ * developer cannot accidentally (or deliberately) exempt a business route by
+ * adding a decorator, unlike a @Public()-style mechanism would allow. Both
+ * routes return liveness/readiness booleans only — no tenant data, no
+ * business logic, nothing an exemption here could leak (§13.7 row 6's mistake
+ * would need a NEW path added to this exact array, which is greppable and
+ * reviewable in a way a decorator scattered across the codebase is not).
+ */
+const UNAUTHENTICATED_HEALTH_PATHS = ['/health', '/health/ready'];
+
+/**
  * Layer-1 origin check (§13.2 step 5, §10.5). Runs in EVERY downstream service as a
  * global APP_GUARD. Rejects any request lacking a validly-signed, non-expired
  * x-internal-context header — this is what makes it impossible for a client to
@@ -36,12 +49,26 @@ export class InternalContextGuard implements CanActivate {
       context.getHandler(),
       context.getClass(),
     ]);
-    // Public routes (§11.5 — exactly three, all live in api-gateway) skip this guard.
-    // A downstream service should never itself declare a route @Public(); if one
-    // does, it bypasses tenant isolation and must be caught in review (§13.7 row 6).
+    // Public routes (§11.5 — exactly three, all live in api-gateway) skip THIS
+    // guard's check entirely, because they run inside api-gateway itself, which
+    // has no InternalContextGuard of its own (it has JwtAuthGuard instead).
+    //
+    // Every downstream service (auth-service included) still verifies a signed
+    // context on 100% of its BUSINESS routes below — even /auth/login, which
+    // has no authenticated identity yet, is signed as an ANONYMOUS context by
+    // the gateway (§9.4) and verified exactly like any other. A downstream
+    // service must NEVER mark a business route @Public() itself; if one does,
+    // it bypasses the one uniform bypass-prevention mechanism the whole
+    // system relies on, and must be caught in review (§13.7 row 6).
     if (isPublic) return true;
 
     const req = context.switchToHttp().getRequest<Request>();
+
+    // §26.4: the ONLY path-based exemption in the system. See
+    // UNAUTHENTICATED_HEALTH_PATHS above for why this is safe and why it is
+    // shaped this way rather than as a decorator.
+    if (UNAUTHENTICATED_HEALTH_PATHS.includes(req.path)) return true;
+
     const payloadB64 = req.header(INTERNAL_CONTEXT_HEADER);
     const signature = req.header(INTERNAL_SIGNATURE_HEADER);
 

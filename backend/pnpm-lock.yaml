@@ -114,6 +114,9 @@ importers:
       '@types/jest':
         specifier: ^30.0.0
         version: 30.0.0
+      '@types/ms':
+        specifier: ^2.1.0
+        version: 2.1.0
       '@types/node':
         specifier: ^26.5.1
         version: 26.5.1
@@ -156,6 +159,10 @@ importers:
       typescript-eslint:
         specifier: ^8.70.0
         version: 8.70.0(eslint@10.10.0)(typescript@5.9.3)
+
+  apps/auth-service: {}
+
+  apps/tenant-service: {}
 
 packages:
 

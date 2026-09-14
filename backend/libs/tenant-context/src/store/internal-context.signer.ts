@@ -35,6 +35,18 @@ export class InternalContextSigner {
   }
 
   /**
+   * §9.4 "Anonymous context": for the gateway's three @Public() routes, where
+   * there is no authenticated identity to sign yet. The signature still proves
+   * the request came through the gateway within the TTL — it just asserts no
+   * identity. This keeps InternalContextGuard's verification uniform: every
+   * downstream service checks the same signature, never a Public() bypass of
+   * its own (see internal-context.guard.ts).
+   */
+  signAnonymous(correlationId: string): { payloadB64: string; signature: string } {
+    return this.sign({ userId: null, organizationId: null, roles: [], correlationId });
+  }
+
+  /**
    * Verifies signature AND expiry. Returns the payload on success, null on any
    * failure (bad signature, expired, malformed). Callers must reject with 401 on
    * null — never fall back to trusting an unsigned context (§10.5).

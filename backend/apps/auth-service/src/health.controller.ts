@@ -3,13 +3,9 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
 /**
- * §26.4: liveness + readiness. Compose uses these for startup ordering.
- * No @Public() — that decorator is reserved for api-gateway's JwtAuthGuard
- * (§11.5) and must never appear on a downstream service's controller
- * (§13.7 row 6). /health and /health/ready are exempted from
- * InternalContextGuard by an exact, hardcoded path check instead (see
- * libs/tenant-context/src/guards/internal-context.guard.ts) — a mechanism a
- * business route cannot opt into by adding a decorator.
+ * §26.4: liveness + readiness. No @Public() (§13.7 row 6) — exempted from
+ * InternalContextGuard by an exact hardcoded path check instead. See
+ * libs/tenant-context/src/guards/internal-context.guard.ts.
  */
 @Controller('health')
 export class HealthController {

@@ -355,7 +355,7 @@ the only component that ever sees a password, and the only one that mints tokens
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/internal/auth/credentials` | Create credentials (called by tenant-service during onboarding) |
+| POST | `/internal/auth/credentials` | Create credentials (called by tenant-service during onboarding). **Mints and returns `userId`** — never accepts one (§11.3) |
 | POST | `/auth/login` | Email + password → access + refresh token |
 | POST | `/auth/refresh` | Rotate refresh token → new access token |
 | POST | `/auth/logout` | Revoke refresh token, add access token JTI to Redis denylist |
@@ -431,6 +431,7 @@ transaction that enforces the seat limit (H2/R7).
 | DELETE | `/users/:id` | Org Admin; frees a seat |
 | POST | `/invitations/:token/accept` | **Public.** Converts a held seat into a user — net zero (§19.8) |
 | DELETE | `/invitations/:id` | Org Admin; revokes a pending invite and **releases its seat** |
+| GET | `/internal/users/:id/role` | **Internal only.** Called by auth-service at login/refresh (§9.2, §11.2) so the JWT `roles` claim reflects the CURRENT role, not a cached one |
 
 **Publishes:** `UserInvited`, `UserCreated`, `UserRemoved`, `UserRoleChanged`, `InvitationExpired`
 → `user.events`; `PlanLimitExceeded` → `subscription.events`;
@@ -590,6 +591,7 @@ for the result; it only makes the waiting invisible.
 | api-gateway | Redis | Direct | Rate-limit buckets, token denylist |
 | tenant-service | auth-service | REST (internal) | Saga step 2 must know credential creation succeeded before advancing |
 | tenant-service | subscription-service | REST (internal) | Saga step 4 must know the default plan was assigned |
+| **auth-service** | **user-service** | **REST (internal)** | Login/refresh must embed the caller's CURRENT role in the JWT `roles` claim — role is user-service's data (`users.role`), not auth-service's, and the token must reflect a promotion/demotion immediately, not after an eventual-consistency delay |
 | user-service | subscription-service | **Same database transaction** | Seat check must be ACID — §19. Not a network call at all |
 | resource-service | subscription-service | Local `plan_limit_cache` + own transaction | Storage limit enforced in one local transaction; cache refreshed by event |
 | **any service** | **audit-service** | **Kafka** | Audit must never block, slow, or fail a user request |
@@ -624,6 +626,22 @@ x-correlation-id: <uuid>
 Receiving services verify the HMAC and the 30-second `exp` before doing anything else. Rejection is
 `401`, logged as a security event. Services bind only to the internal Docker network — they are not
 published to the host — so this is defence in depth, not the only control.
+
+**Anonymous context, for the three `@Public()` gateway routes (§11.5).** `/auth/login`,
+`/auth/refresh` and `/onboarding/signup`/`/invitations/:token/accept` have no authenticated identity
+yet — there is nothing for the gateway to sign as `userId`/`orgId`. Rather than let `auth-service`
+or `tenant-service` declare their own `@Public()` exception to `InternalContextGuard` (which would
+mean two different bypass mechanisms in the system), the gateway signs an **anonymous context** for
+these routes: the same header shape, with `userId: null`, `organizationId: null`, `roles: []`. The
+signature still proves "this request came through the gateway, over the internal network, within
+the last 30 seconds" — it just asserts no identity. `InternalContextGuard` verifies it exactly as it
+verifies any other signed context; **no downstream service ever declares a route `@Public()`**. The
+receiving handler for these specific routes simply does not read `TenantContext.get()` for identity
+(there is none), and validates its own input via DTOs instead.
+
+This keeps the system's isolation-bypass story to exactly one shape everywhere: a request without a
+valid, non-expired HMAC signature is rejected, full stop — whether or not that signature happens to
+assert an identity.
 
 ---
 
@@ -708,6 +726,8 @@ auth-service
    │     on failure → generic "Invalid credentials" (no user-existence oracle)
    │                → publish AuthenticationFailed → security.events
    ├─ reject if organization.status != 'active'                 (blocks half-onboarded orgs)
+   ├─ GET user-service /internal/users/:id/role   (§9.2 — role is user-service's data,
+   │     synchronous, so a promotion/demotion is reflected on the very next login)
    ├─ mint ACCESS token  (15 min)   { sub, orgId, roles, jti, iat, exp }
    ├─ mint REFRESH token (7 days)   stored hashed in refresh_tokens
    ▼
@@ -717,6 +737,17 @@ Response  { accessToken, refreshToken, user: { id, email, role, organizationId }
 ### 11.3 The identity → tenant mapping
 
 This is the hinge of the whole system:
+
+**Who mints `user_id`.** During onboarding, `auth-service` creates a credential row
+*before* any `users` row exists (`user-service` creates it later, asynchronously,
+reacting to `OrganizationProvisioned` — §8.4 "consumes"). `auth-service` is
+therefore the earliest point this identity exists, and it mints the UUID: it
+generates `user_id`, uses it as `credentials.user_id`, and carries it in the
+`UserCredentialsCreated` event payload so `user-service` creates its row with that
+same id as the primary key — never a fresh one. `POST /internal/auth/credentials`
+does not accept a caller-supplied `userId` for exactly this reason: accepting one
+would let a caller assert an identity rather than receive the one the system of
+record minted.
 
 ```
 credentials.user_id ──────► users.id            (one user, one organisation)
@@ -1058,11 +1089,16 @@ Four checks, runnable in CI:
 3. **Careless-query test.** A repository method with no tenant filter, plus a raw-SQL variant.
    Seeded with two orgs' data, asserted to return only the current tenant's rows.
 4. **Table classification test.** Every table appears in exactly one of three explicit lists —
-   `GLOBAL_TABLES` (`plans`, migrations), `REGISTRY_TABLES` (`organizations`,
-   `onboarding_sagas` — the tenant registry itself, not tenant content; deliberately
-   not RLS-protected because a platform admin legitimately reads them directly for
-   the org list, §13.6), or `TENANT_TABLES`. A new table in none of the three fails
-   the build.
+   `GLOBAL_TABLES` (`plans`, migrations), `REGISTRY_TABLES`, or `TENANT_TABLES`. A new table in
+   none of the three fails the build. `REGISTRY_TABLES` covers tables carrying a tenant reference
+   with no cross-tenant *listing* surface — every query is a lookup by a unique key the caller
+   already has, never a per-organisation scan RLS alone would need to filter. Two justifications
+   currently populate it: `organizations`/`onboarding_sagas` (§8.3 — the tenant registry itself,
+   not content; RLS would block platform admins' legitimate org-list read, §13.6) and
+   `credentials`/`refresh_tokens` (§8.2 — always looked up by email or userId, never listed
+   per-organisation; `auth_db` has no RLS at all). A table lands here only under one of these
+   justifications, documented at the migration that creates it — never because scoping it felt
+   inconvenient.
 
 ### 13.9 Cross-tenant attempt detection
 
@@ -2202,6 +2238,17 @@ Each service exposes `/health` (liveness — process is up) and `/health/ready` 
 reachable, Kafka connected, Redis reachable). Compose uses these for dependency ordering so
 `docker compose up` comes up cleanly without manual retries.
 
+**These two exact paths are the only routes in the system exempted from `InternalContextGuard`'s
+signature check** — Docker Compose's healthcheck prober is a plain HTTP `GET`, with no way to
+produce a signed `x-internal-context` header. The exemption is a hardcoded path comparison inside
+`InternalContextGuard` (`req.path === '/health' || req.path === '/health/ready'`), not a decorator:
+a decorator any controller could apply would be an extensible bypass; a fixed path list checked in
+one place, reviewable in one diff, is not. Both routes return only booleans (`status`, `database`)
+— there is no tenant data, no business logic, and no argument shape an attacker could use to make
+this exemption do anything beyond "is the process alive". This is distinct from `@Public()`
+(§11.5), which exists solely for `api-gateway`'s `JwtAuthGuard` — no downstream service's business
+route is ever exempted this way (§13.7 row 6).
+
 ### 26.5 Not included
 
 No Prometheus, Grafana, Jaeger or ELK (§4). Structured JSON logs with correlation IDs meet the
@@ -2499,6 +2546,28 @@ functional requirements in the brief's §3–§8 are stack-agnostic and are met 
 
 Worth stating plainly in a walkthrough rather than glossing: the substitution was directed, and
 nothing in the brief's requirements depends on the framework or ORM it happened to name.
+
+### 32.3 Implementation-phase tracked gaps
+
+Two gaps surfaced during `auth-service`'s implementation that cannot be closed until a *later*
+service exists — they are cross-service wiring, not an auth-service defect, and are tracked here so
+they are not silently forgotten once the services that close them are built.
+
+- **Suspended-organisation login is not yet blocked.** §11.2 lists "reject if
+  `organization.status != 'active'`" as a login step. `auth-service` has no synchronous or cached
+  view of organisation status — that lives in `tenant-service`. For now, a login for a *suspended*
+  org (as opposed to one still `provisioning`, which never has credentials at all — §30.1's step
+  order already prevents that case) is not rejected. Close this when `tenant-service` publishes
+  `OrganizationSuspended` (already in the event catalogue, §17.3): `auth-service` consumes it and
+  disables the affected credentials (§8.2's `credentials.status`), which the login path already
+  checks.
+- **Immediate access-token revocation is not yet wired end to end.** §11.4 states logout adds the
+  access token's `jti` to a Redis denylist "so revocation is immediate rather than up-to-15-minutes
+  late." `auth-service`'s `logout()` revokes the refresh token (the part it owns); the access-token
+  denylist write is `api-gateway`'s responsibility (`libs/redis`'s `RedisTokenDenylist` and
+  `JwtStrategy` are already built — §16.2 use #2 — but nothing calls `deny()` yet, since the gateway
+  itself is not built). Close this when `api-gateway`'s logout route is implemented: it must call
+  `RedisTokenDenylist.deny(jti, remainingTtl)` before or alongside forwarding to `auth-service`.
 
 ---
 

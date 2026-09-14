@@ -9,15 +9,32 @@
 export const GLOBAL_TABLES = ['plans'] as const;
 
 /**
- * The tenant REGISTRY, not tenant CONTENT (§8.3). Deliberately not RLS-protected —
- * a platform admin legitimately reads these directly for the org list (§13.6), and
- * RLS would block that legitimate read. This is what makes "platform admin sees
- * orgs but not content" structural: these are the only two tables a platform
- * admin's queries ever touch, and neither can hold organisation content by
- * definition (§8.3's schema). A table belongs here ONLY if it is part of the
- * registry/orchestration layer itself — never for "it's inconvenient to scope".
+ * Tables that carry `organization_id` (or an equivalent tenant reference) but are
+ * DELIBERATELY NOT RLS-protected, because they have no cross-tenant LISTING
+ * surface — every query against them is a lookup by a unique key the caller
+ * already has (an id, an email, a token hash), never "give me all rows for
+ * organisation X" filtered only by RLS. Two distinct justifications currently
+ * live here, both documented at the point each table is created:
+ *
+ *   - `organizations`, `onboarding_sagas` (§8.3, tenant-service): the tenant
+ *     REGISTRY itself, not tenant content. RLS would block platform admins'
+ *     legitimate org-list read — this is what makes "platform admin sees orgs
+ *     but not content" structural (§13.6).
+ *   - `credentials`, `refresh_tokens` (§8.2, auth-service): always looked up by
+ *     email or userId, never listed per organisation. auth_db has no RLS at
+ *     all (§14.1) — a single-service database with no cross-tenant query
+ *     surface for RLS to guard.
+ *
+ * A table belongs here ONLY under one of these justifications — never for
+ * "it's inconvenient to scope". Adding a table here without a documented
+ * reason is exactly the mistake §13.7 row 7 exists to catch.
  */
-export const REGISTRY_TABLES = ['organizations', 'onboarding_sagas'] as const;
+export const REGISTRY_TABLES = [
+  'organizations',
+  'onboarding_sagas',
+  'credentials',
+  'refresh_tokens',
+] as const;
 
 export const TENANT_TABLES = [
   'users',
