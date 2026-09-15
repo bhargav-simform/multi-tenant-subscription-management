@@ -18,12 +18,14 @@
  */
 /**
  * `consumed_events` (§17.6) is created ONCE PER CONSUMING SERVICE, in that
- * service's own schema (currently `users.consumed_events` for user-service —
- * see its migration). A bare, unqualified name here cannot distinguish
- * `users.consumed_events` from a future `audit.consumed_events` etc.; that is
- * fine for now (there is one physical instance), but the future automated
- * §13.8 check must classify by schema-qualified name, not bare name, once a
- * second consuming service creates its own copy.
+ * service's own schema — now TWO physical instances exist
+ * (`users.consumed_events` for user-service, `subs.consumed_events` for
+ * subscription-service; see each service's own migration). A bare,
+ * unqualified name here cannot distinguish them. Harmless today because
+ * nothing automated reads this list yet (see the file header above); the
+ * §13.8 check, once written, MUST classify by schema-qualified name, not
+ * bare name, or it cannot correctly report which physical table a finding
+ * refers to.
  */
 export const GLOBAL_TABLES = ['plans', 'consumed_events'] as const;
 

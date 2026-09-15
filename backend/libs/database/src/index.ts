@@ -6,3 +6,4 @@ export * from './data-source/assert-rls-safe-role';
 export * from './naming/snake-naming.strategy';
 export * from './repository/tenant-repository';
 export * from './module';
+export * from './transformers/bigint.transformer';
