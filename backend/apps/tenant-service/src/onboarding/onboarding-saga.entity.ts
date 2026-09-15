@@ -48,6 +48,15 @@ export class OnboardingSaga {
   @Column({ name: 'admin_email', type: 'varchar', length: 255 })
   adminEmail!: string;
 
+  /**
+   * §11.3: set once CREDENTIALS_CREATED succeeds — the userId auth-service
+   * minted for this admin. Carried forward to COMPLETE so
+   * ORGANIZATION_PROVISIONED's payload lets user-service create its row with
+   * the SAME id credentials.user_id already points to.
+   */
+  @Column({ name: 'admin_user_id', type: 'uuid', nullable: true })
+  adminUserId!: string | null;
+
   @Column({ name: 'last_error', type: 'text', nullable: true })
   lastError!: string | null;
 

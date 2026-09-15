@@ -51,6 +51,7 @@ export class CreateOrganizationsAndSagas1700000000001 implements MigrationInterf
         "organization_id" uuid,
         "state" "onboarding_sagas_state_enum" NOT NULL DEFAULT 'pending',
         "admin_email" varchar(255) NOT NULL,
+        "admin_user_id" uuid,
         "last_error" text,
         "failed_at" timestamptz,
         "attempts" int NOT NULL DEFAULT 0,

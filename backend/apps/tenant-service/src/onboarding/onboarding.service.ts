@@ -90,8 +90,8 @@ export class OnboardingService {
       }
 
       if (saga.state === SagaState.ORG_CREATED) {
-        await this.createAdminCredentials(saga.id, organizationId!, dto);
-        saga = { ...saga, state: SagaState.CREDENTIALS_CREATED };
+        const adminUserId = await this.createAdminCredentials(saga.id, organizationId!, dto);
+        saga = { ...saga, state: SagaState.CREDENTIALS_CREATED, adminUserId };
       }
 
       if (saga.state === SagaState.CREDENTIALS_CREATED) {
@@ -100,7 +100,11 @@ export class OnboardingService {
       }
 
       if (saga.state === SagaState.SUBSCRIBED) {
-        await this.completeOnboarding(saga.id, organizationId!);
+        // saga.adminUserId reflects the DB row at fetch time (or the value
+        // just set above), so this is correct whether this call is
+        // completing a saga in one pass or resuming one that already
+        // reached CREDENTIALS_CREATED in a prior, failed attempt.
+        await this.completeOnboarding(saga.id, organizationId!, saga.adminUserId!, dto);
       }
 
       const org = await this.organizations.findById(organizationId!);
@@ -154,15 +158,25 @@ export class OnboardingService {
     sagaId: string,
     organizationId: string,
     dto: SignupDto,
-  ): Promise<void> {
-    await this.authClient.createCredentials({
+  ): Promise<string> {
+    // §11.3: auth-service mints userId and returns it. It is persisted on the
+    // saga row here so COMPLETE can carry it forward into
+    // OrganizationProvisioned — user-service's consumer creates the first
+    // admin user with this SAME id, never a fresh one.
+    const { userId } = await this.authClient.createCredentials({
       organizationId,
       email: dto.adminEmail,
       password: dto.adminPassword,
     });
     await this.dataSource.transaction((manager) =>
-      this.sagas.advance(sagaId, SagaState.CREDENTIALS_CREATED, {}, manager),
+      this.sagas.advance(
+        sagaId,
+        SagaState.CREDENTIALS_CREATED,
+        { adminUserId: userId },
+        manager,
+      ),
     );
+    return userId;
   }
 
   private async assignDefaultPlan(sagaId: string, organizationId: string): Promise<void> {
@@ -172,15 +186,25 @@ export class OnboardingService {
     );
   }
 
-  private async completeOnboarding(sagaId: string, organizationId: string): Promise<void> {
+  private async completeOnboarding(
+    sagaId: string,
+    organizationId: string,
+    adminUserId: string,
+    dto: SignupDto,
+  ): Promise<void> {
     await this.dataSource.transaction(async (manager) => {
       await this.organizations.updateStatus(organizationId, OrganizationStatus.ACTIVE, manager);
       await this.sagas.advance(sagaId, SagaState.COMPLETE, {}, manager);
     });
     // §30.1: this is the moment the org becomes loggable-into — user-service
-    // creates the first admin user reacting to this event (§8.4 consumes).
+    // creates the first admin user reacting to this event (§8.4 consumes),
+    // using the SAME id auth-service minted for the credential (§11.3).
     await this.publishEvent(organizationId, EVENT_TYPES.ORGANIZATION_PROVISIONED, {
       organizationId,
+      adminUserId,
+      adminEmail: dto.adminEmail,
+      adminFirstName: dto.adminFirstName,
+      adminLastName: dto.adminLastName,
     });
   }
 

@@ -7,3 +7,5 @@ export interface ConsumedEventStore {
   wasConsumed(eventId: string): Promise<boolean>;
   markConsumed(eventId: string): Promise<void>;
 }
+
+export const CONSUMED_EVENT_STORE = Symbol('CONSUMED_EVENT_STORE');

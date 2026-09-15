@@ -49,6 +49,39 @@ export class CreateUsersAndInvitations1700000000001 implements MigrationInterfac
       CREATE INDEX "idx_users_org_created" ON "users"."users" ("organization_id", "created_at" DESC, "id")
     `);
 
+    // §9.2, §11.2: auth-service's role lookup (GET /internal/users/:id/role)
+    // needs organization_id for a user id with NO tenant context established
+    // yet — the caller doesn't know the org ahead of time. Because
+    // users.users has FORCE ROW LEVEL SECURITY, an ordinary query from
+    // app_user with app.current_org unset returns ZERO ROWS UNCONDITIONALLY
+    // (§13.5) — there is no way to "just query by id" through the normal
+    // path, even from the table owner's perspective, because app_user is not
+    // the owner and RLS applies to it regardless of FORCE.
+    //
+    // This SECURITY DEFINER function is a single narrow, auditable exception:
+    // it runs with app_migrator's privileges (the function owner), returns
+    // EXACTLY ONE COLUMN (organization_id — never role, email, or name), and
+    // is granted to app_user for EXECUTE only. It is not a general RLS
+    // bypass; app_user's own SELECT/UPDATE/etc. privileges on the table are
+    // unchanged, and this function cannot be used to read anything but the
+    // org id for a given user id.
+    await queryRunner.query(`
+      CREATE FUNCTION "users"."get_user_organization_id"(p_user_id uuid)
+      RETURNS uuid
+      LANGUAGE sql
+      SECURITY DEFINER
+      SET search_path = users, pg_temp
+      AS $$
+        SELECT organization_id FROM users.users WHERE id = p_user_id;
+      $$
+    `);
+    await queryRunner.query(`
+      REVOKE ALL ON FUNCTION "users"."get_user_organization_id"(uuid) FROM PUBLIC
+    `);
+    await queryRunner.query(`
+      GRANT EXECUTE ON FUNCTION "users"."get_user_organization_id"(uuid) TO app_user
+    `);
+
     // ── users.invitations (§8.4, RLS: yes) ──────────────────────────────
     await queryRunner.query(`
       CREATE TABLE "users"."invitations" (
@@ -113,6 +146,7 @@ export class CreateUsersAndInvitations1700000000001 implements MigrationInterfac
   public async down(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(`DROP TABLE "subs"."subscriptions"`);
     await queryRunner.query(`DROP TABLE "users"."invitations"`);
+    await queryRunner.query(`DROP FUNCTION "users"."get_user_organization_id"(uuid)`);
     await queryRunner.query(`DROP TABLE "users"."users"`);
     await queryRunner.query(`DROP TYPE "users"."users_status_enum"`);
     await queryRunner.query(`DROP TYPE "users"."users_role_enum"`);

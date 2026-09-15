@@ -57,6 +57,7 @@ describe('OnboardingService', () => {
       organizationId: null,
       state: SagaState.PENDING,
       adminEmail: dto.adminEmail,
+      adminUserId: null,
       lastError: null,
       failedAt: null,
       attempts: 0,
@@ -139,7 +140,7 @@ describe('OnboardingService', () => {
     const idempotency = { claim: jest.fn<() => Promise<boolean>>().mockResolvedValue(true) };
     const publisher = {
       publish: jest
-        .fn<(topic: string, event: { eventType: string }) => Promise<void>>()
+        .fn<(topic: string, event: { eventType: string; payload: unknown }) => Promise<void>>()
         .mockResolvedValue(undefined),
     };
 
@@ -194,6 +195,11 @@ describe('OnboardingService', () => {
       EVENT_TYPES.ORGANIZATION_CREATED,
       EVENT_TYPES.ORGANIZATION_PROVISIONED,
     ]);
+    // §11.3: the userId auth-service minted ('u1', the default mock) is the
+    // SAME id carried into OrganizationProvisioned — user-service's consumer
+    // creates its row with this id, never a fresh one.
+    const [, provisionedEvent] = publisher.publish.mock.calls[1];
+    expect(provisionedEvent.payload).toMatchObject({ adminUserId: 'u1' });
   });
 
   it('RESUMES from ORG_CREATED without re-creating the organisation (§30.1)', async () => {
@@ -222,11 +228,12 @@ describe('OnboardingService', () => {
     const failedSaga = makeSaga({
       state: SagaState.CREDENTIALS_CREATED,
       organizationId: org.id,
+      adminUserId: 'admin-user-1', // set when CREDENTIALS_CREATED first succeeded
       failedAt: new Date('2026-01-01T00:00:00Z'),
       lastError: 'subscription-service unreachable',
     });
     const { authClient, subscriptionClient } = makeClients();
-    const { service, organizations } = await buildService({
+    const { service, organizations, publisher } = await buildService({
       saga: failedSaga,
       org,
       authClient,
@@ -241,6 +248,14 @@ describe('OnboardingService', () => {
     // Only the step after the recorded failure point runs.
     expect(subscriptionClient.assignDefaultPlan).toHaveBeenCalledTimes(1);
     expect(result.organizationId).toBe(org.id);
+    // §11.3: the ORIGINALLY minted adminUserId (persisted on the saga at the
+    // first CREDENTIALS_CREATED, not re-minted) reaches the final event.
+    const provisionedCall = publisher.publish.mock.calls.find(
+      (call) => (call[1] as { eventType: string }).eventType === EVENT_TYPES.ORGANIZATION_PROVISIONED,
+    );
+    expect(provisionedCall?.[1]).toMatchObject({
+      payload: expect.objectContaining({ adminUserId: 'admin-user-1' }),
+    });
   });
 
   it('returns the existing result for an already-COMPLETE saga without re-running anything', async () => {

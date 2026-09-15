@@ -61,6 +61,48 @@ export class TenantAwareDataSource {
     return this.runScoped(organizationId, work);
   }
 
+  /**
+   * §19.8's exact case: a single transaction that must LOOK UP which
+   * organisation it belongs to (from a token, in user-service's invitation
+   * acceptance) before it can be scoped — and must do the lookup and the
+   * scoped work atomically, in one lock, rather than two separate
+   * transactions with a gap between them.
+   *
+   * `work` receives a `setScope(organizationId)` callback. The transaction
+   * begins with app.current_org UNSET (like runGlobal) — RLS-protected reads
+   * before calling setScope() return nothing, by the same mechanism as
+   * everywhere else in this file, which is why the initial lookup a caller
+   * does here MUST be on a non-RLS column set (e.g. a lookup keyed by a
+   * cryptographically random single-use token is the authorization itself —
+   * §11.5's reasoning for why that route is public at all) or via one of the
+   * narrow named exceptions in §13.6 (the SECURITY DEFINER function pattern).
+   * Once setScope() is called, every subsequent query in this same
+   * transaction is RLS-scoped exactly as if `transaction()` had been used
+   * from the start — including the initial rows read before scoping, which
+   * remain visible only because they were already fetched into memory, not
+   * because RLS retroactively applies to them.
+   */
+  async transactionWithDeferredScope<T>(
+    work: (manager: EntityManager, setScope: (organizationId: string) => Promise<void>) => Promise<T>,
+  ): Promise<T> {
+    const queryRunner: QueryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+    try {
+      const setScope = async (organizationId: string): Promise<void> => {
+        await queryRunner.query('SET LOCAL app.current_org = $1', [organizationId]);
+      };
+      const result = await work(queryRunner.manager, setScope);
+      await queryRunner.commitTransaction();
+      return result;
+    } catch (err) {
+      await queryRunner.rollbackTransaction();
+      throw err;
+    } finally {
+      await queryRunner.release();
+    }
+  }
+
   private async runScoped<T>(
     organizationId: string | null,
     work: (manager: EntityManager) => Promise<T>,

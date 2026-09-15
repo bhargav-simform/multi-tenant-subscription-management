@@ -31,26 +31,28 @@ export class SubscriptionSeatRepository implements ISubscriptionSeatRepository {
     delta: number,
     manager: EntityManager,
   ): Promise<void> {
+    assertSafeInt(delta);
     await manager
       .createQueryBuilder()
       .update(SubscriptionSeatView)
-      .set({ usedSeats: () => `used_seats + ${sqlSafeInt(delta)}` })
+      .set({ usedSeats: () => 'used_seats + :delta' })
       .where('organizationId = :organizationId', { organizationId })
+      .setParameter('delta', delta)
       .execute();
   }
 }
 
 /**
  * `delta` is always a small compile-time-controlled integer from within this
- * service (+1/-1) — never user input — but the value still must not be
- * interpolated as an untyped parameter into a raw SQL fragment. Validating
- * it is an integer before interpolation keeps this expression's contract
- * (§25.1's spirit: validate before it reaches the query) even though it
- * never carries request-controlled data.
+ * service (+1/-1, or a bounded count from the sweep) — never user input, and
+ * bound as a query parameter (`:delta`) rather than interpolated into the SQL
+ * string, so this is not a §25.1 injection concern either way. Kept as an
+ * explicit assertion anyway: a non-integer here means a caller-side bug
+ * (e.g. passing a count that came from something other than `.length`),
+ * and failing loudly beats silently corrupting `used_seats`.
  */
-function sqlSafeInt(value: number): number {
+function assertSafeInt(value: number): void {
   if (!Number.isInteger(value)) {
-    throw new Error(`adjustUsedSeats delta must be an integer, got ${value}`);
+    throw new TypeError(`adjustUsedSeats delta must be an integer, got ${value}`);
   }
-  return value;
 }

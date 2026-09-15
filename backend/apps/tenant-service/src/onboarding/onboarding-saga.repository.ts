@@ -17,7 +17,7 @@ export interface IOnboardingSagaRepository {
   advance(
     id: string,
     state: SagaState,
-    patch: Partial<Pick<OnboardingSaga, 'organizationId'>>,
+    patch: Partial<Pick<OnboardingSaga, 'organizationId' | 'adminUserId'>>,
     manager: EntityManager,
   ): Promise<void>;
   /**
@@ -58,7 +58,7 @@ export class OnboardingSagaRepository implements IOnboardingSagaRepository {
   async advance(
     id: string,
     state: SagaState,
-    patch: Partial<Pick<OnboardingSaga, 'organizationId'>>,
+    patch: Partial<Pick<OnboardingSaga, 'organizationId' | 'adminUserId'>>,
     manager: EntityManager,
   ): Promise<void> {
     const repo = manager.getRepository(OnboardingSaga);

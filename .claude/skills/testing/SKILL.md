@@ -23,7 +23,20 @@ Reference: `docs/architecture/ARCHITECTURE.md` §28.
 
 **Testcontainers is non-negotiable for integration.** RLS policies, `FOR UPDATE`
 blocking and `CHECK` constraints are PostgreSQL behaviours. A mocked repository
-proves nothing about them — it tests the mock.
+proves nothing about them — it tests the mock. Verify this yourself once per
+lock: temporarily remove the `.setLock(...)` (or the `FOR UPDATE` SQL) and
+confirm your integration test fails while your unit test does not. A
+concurrency unit test with an in-memory fake that serialises every call
+unconditionally will pass even with the lock deleted — this happened once
+already (`user-service`'s first pass) and was caught only by a review, not by
+CI.
+
+**Use `test/integration/support/postgres-test-container.ts`** — the shared
+helper, not a new one per service. It creates the exact `app_migrator`/
+`app_user` roles `docker/postgres/init.sh` creates in production
+(`NOSUPERUSER`/`NOBYPASSRLS`, §13.5), runs your migration as `app_migrator`,
+and connects as `app_user`. `pnpm test:integration` runs this suite (real
+Docker, tens of seconds); `pnpm test` does not include it.
 
 ## The four critical tests
 

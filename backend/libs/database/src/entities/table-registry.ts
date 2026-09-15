@@ -5,8 +5,27 @@
  * it actually holds tenant data).
  *
  * Update this file in the SAME migration/PR that creates a new table.
+ *
+ * CURRENT STATUS: this file is the REGISTRY the §13.8 check reads — the check
+ * itself (an automated test asserting every table in the database appears in
+ * exactly one list, and every table listed here actually exists) has not been
+ * written yet. Until it exists, `TENANT_TABLES` below includes entries for
+ * tables owned by services not yet built (subscription-service,
+ * resource-service, audit-service) — this file doubles as the forward
+ * declaration those services' migrations must match, not (yet) an enforced
+ * invariant. Writing the actual CI check is tracked as future work; do not
+ * assume its absence means classification is optional.
  */
-export const GLOBAL_TABLES = ['plans'] as const;
+/**
+ * `consumed_events` (§17.6) is created ONCE PER CONSUMING SERVICE, in that
+ * service's own schema (currently `users.consumed_events` for user-service —
+ * see its migration). A bare, unqualified name here cannot distinguish
+ * `users.consumed_events` from a future `audit.consumed_events` etc.; that is
+ * fine for now (there is one physical instance), but the future automated
+ * §13.8 check must classify by schema-qualified name, not bare name, once a
+ * second consuming service creates its own copy.
+ */
+export const GLOBAL_TABLES = ['plans', 'consumed_events'] as const;
 
 /**
  * Tables that carry `organization_id` (or an equivalent tenant reference) but are

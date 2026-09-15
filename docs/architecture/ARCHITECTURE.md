@@ -431,7 +431,7 @@ transaction that enforces the seat limit (H2/R7).
 | DELETE | `/users/:id` | Org Admin; frees a seat |
 | POST | `/invitations/:token/accept` | **Public.** Converts a held seat into a user — net zero (§19.8) |
 | DELETE | `/invitations/:id` | Org Admin; revokes a pending invite and **releases its seat** |
-| GET | `/internal/users/:id/role` | **Internal only.** Called by auth-service at login/refresh (§9.2, §11.2) so the JWT `roles` claim reflects the CURRENT role, not a cached one |
+| GET | `/internal/users/:id/role` | **Internal only.** Called by auth-service at login/refresh (§9.2, §11.2) so the JWT `roles` claim reflects the CURRENT role, not a cached one. The handler resolves `organization_id` via the narrow `SECURITY DEFINER` function documented in §13.6, since the caller has no tenant context to supply |
 
 **Publishes:** `UserInvited`, `UserCreated`, `UserRemoved`, `UserRoleChanged`, `InvitationExpired`
 → `user.events`; `PlanLimitExceeded` → `subscription.events`;
@@ -1072,10 +1072,28 @@ R9 requires a platform admin to see organisations but not content, and the bound
 - Platform admins read only from `tenant_db` (org metadata, no content) and from
   `subscription-service`'s aggregate endpoint (integers, no content).
 
-**There is no bypass flag.** No `skipRls`, no `asSystem()`, no admin connection pool. The one
-scenario that would need it — a background job operating across tenants — does not exist in this
-POC. If one is ever added, it must be a separate documented database role with its own policy, not
-a boolean parameter that an endpoint could accidentally set.
+**There is no general-purpose bypass flag.** No `skipRls`, no `asSystem()`, no admin connection pool
+— no boolean parameter that an endpoint could accidentally set to read across every tenant. The two
+genuine exceptions in the system are both narrow, named, and auditable rather than general:
+
+- **`TenantAwareDataSource.runGlobal()`** (§15.3) — a plain transaction with `app.current_org` left
+  unset. Used only where the operation is genuinely tenant-agnostic: migrations, and the
+  invitation-expiry sweep's org enumeration (§19.9, which then opens a normal per-org scoped
+  transaction for the actual work). It grants no special database privilege — a query run through it
+  is subject to RLS exactly like any other `app_user` query, which is precisely why it returns
+  nothing useful against a tenant table on its own.
+- **`users.get_user_organization_id(uuid)`**, a `SECURITY DEFINER` SQL function (§8.4) — the one
+  place a genuine RLS bypass exists, and it is deliberately as narrow as a bypass can be: it runs
+  with the function owner's (`app_migrator`'s) privileges, returns **exactly one column**
+  (`organization_id`, never role/email/name/anything else), and exists to answer exactly one
+  question — "which org does this user id belong to?" — for `auth-service`'s login/refresh role
+  lookup (§9.2), which has no way to know the answer in advance. `app_user` is granted `EXECUTE` on
+  this function and nothing broader; it cannot be used to read any other column, and every other
+  read of that user's data still goes through the normal RLS-scoped path afterward.
+
+Neither exception is a parameter an endpoint could flip. Both are declared once, at the schema
+level, doing one specific, reviewable thing — which is the difference between an audited exception
+and a bypass flag.
 
 This is how "prove a platform admin cannot see content" is answered: not by auditing every platform
 admin endpoint for a missing filter, but by observing that the connection they use is structurally
@@ -1318,6 +1336,19 @@ The single point through which tenant scoping is applied:
 Read-only queries outside an explicit transaction are wrapped in an implicit one, because
 `SET LOCAL` requires a transaction to be scoped to. The small cost of an extra `BEGIN`/`COMMIT` on
 simple reads buys the guarantee that there is no code path where the variable is unset.
+
+**A fourth method, `transactionWithDeferredScope()`, for the one case where the organisation is not
+known until partway through a transaction.** Invitation acceptance (§19.8) is the case: the caller
+has only a token, and the organisation it belongs to is discovered by looking the token up — but the
+lookup, the discovery, and the subsequent scoped work (locking the subscription row, creating the
+user, marking the invitation accepted) all need to happen under **one** lock, with no gap where a
+concurrent request could act between "found the org" and "scoped the transaction to it". This method
+opens a transaction with `app.current_org` unset (like `runGlobal()`), hands the callback a
+`setScope(organizationId)` function, and lets the callback call it once it has discovered which
+tenant it belongs to — every query after that point in the *same* transaction is scoped exactly as
+`transaction()` would have scoped it from the start. The initial, pre-scope lookup must be on a
+non-RLS-dependent key (a random single-use token is itself the authorization to read that one row —
+§11.5) or via one of the two named exceptions in §13.6.
 
 ### 15.4 Repository pattern and DI
 
@@ -1707,7 +1738,7 @@ than as a one-off.
 | Invite accepted while a sweep expires it | Both take the subscription row lock; acceptance re-checks `expires_at` inside the transaction |
 | Plan downgrade below current usage | Blocked (D-Q4): usage is compared against the target plan inside the same locked transaction |
 | Lock contention under sustained load | All invites for **one org** serialise; different orgs never contend, because the lock is per-org-row. Acceptable: a single organisation inviting hundreds of users per second is not a real workload |
-| Deadlock | Avoided by consistent lock ordering — the subscription row is always locked first, before any user or resource row |
+| Deadlock | Avoided by consistent lock ordering — the subscription row is always locked first, before any user or resource row — with **one documented exception**: invitation acceptance (§19.8) cannot know which subscription row to lock until it has found and locked the invitation row by token, so that one path locks invitation-then-subscription while the sweep (§19.9) locks subscription-then-invitation. PostgreSQL detects the resulting deadlock and aborts one side with `40P01` rather than hanging; the caller retries. Accepted as a rare, detected-not-silent failure mode, not a gap in the guarantee itself — R7's correctness never depends on avoiding this deadlock, only on the lock existing at all |
 | Transaction timeout | `statement_timeout` 5s. A blocked request fails with 503 rather than hanging |
 
 ### 19.8 Invitation acceptance — net-zero, but still locked
@@ -1755,6 +1786,11 @@ Three properties worth noting:
 - It iterates **org by org, establishing tenant scope per organisation** (§15.3 `runGlobal()` to
   enumerate, then a normal scoped transaction per org). It is **not** granted an RLS bypass — that
   would punch a hole in §13.6's "no bypass exists anywhere" guarantee for the sake of a cron job.
+  Enumeration reads `DISTINCT organization_id` from `subs.subscriptions` — a table already in
+  `core_db`, which `user-service` connects to anyway (§14.2) — rather than calling `tenant-service`
+  over HTTP for the org list. Every organisation gets exactly one subscription row during onboarding
+  (§30.1), so this is a complete enumeration with no cross-service network dependency added to a
+  background job.
 - It is **conservative under failure**: if the sweep stalls, seats stay held. An org may see a 409
   while genuinely under its cap, which is a degraded experience but never a breached limit (§30.2).
 
@@ -2354,6 +2390,19 @@ nginx (the gateway is the entry point; a second reverse proxy adds a hop and no 
 and `CHECK` constraints are PostgreSQL behaviours. A mocked repository proves nothing about any of
 them — it would test the mock.
 
+This was not a hypothetical during `user-service`'s implementation: its first concurrency test suite
+used an in-memory fake that serialised every call unconditionally, regardless of whether the
+production code took a real lock — a review caught that the test would pass even with
+`FOR UPDATE` deleted from the repository. The fix, `test/integration/support/postgres-test-container.ts`,
+is the shared helper every service's integration suite uses: it spins up a real PostgreSQL container,
+creates the exact `app_migrator`/`app_user` roles `docker/postgres/init.sh` creates in the real
+deployment (§13.5's `NOSUPERUSER`/`NOBYPASSRLS` property, not a superuser shortcut), runs the
+service's own migration as `app_migrator`, and connects as `app_user` — the same role every service
+actually runs as. `test/integration/user-service/seat-lock.integration.spec.ts` is the T3 proof this
+produces: it was verified, not just written, by deliberately deleting the lock and confirming the
+test fails while the unit-test suite does not. `pnpm test:integration` runs the Testcontainers suite
+(tens of seconds, real Docker); `pnpm test` runs only the fast unit suite and does not include it.
+
 ### 28.2 The four tests that matter most
 
 These are first-class deliverables, not coverage incidentals. Each maps to a brief requirement.
@@ -2578,7 +2627,7 @@ nothing in the brief's requirements depends on the framework or ORM it happened 
 
 ### 32.3 Implementation-phase tracked gaps
 
-Two gaps surfaced during `auth-service`'s implementation that cannot be closed until a *later*
+Three gaps surfaced during implementation that cannot be closed until a *later*
 service exists — they are cross-service wiring, not an auth-service defect, and are tracked here so
 they are not silently forgotten once the services that close them are built.
 
@@ -2597,6 +2646,20 @@ they are not silently forgotten once the services that close them are built.
   `JwtStrategy` are already built — §16.2 use #2 — but nothing calls `deny()` yet, since the gateway
   itself is not built). Close this when `api-gateway`'s logout route is implemented: it must call
   `RedisTokenDenylist.deny(jti, remainingTtl)` before or alongside forwarding to `auth-service`.
+- **No `subs.subscriptions` row can exist until `subscription-service` is built — every §19
+  seat-changing operation returns 500 until then, by design of the build order.**
+  `tenant-service`'s onboarding saga calls `POST /internal/subscriptions` on `subscription-service`
+  during `assignDefaultPlan` (§30.1's `SUBSCRIBED` step) to create that row; until that service
+  exists, no organisation ever gets one, and `user-service`'s `SubscriptionSeatRepository.lockForUpdate`
+  correctly throws `InternalServerErrorException` for a missing row rather than silently treating a
+  missing row as "unlimited" or "zero" (§8.3: every organisation is guaranteed exactly one
+  subscription row by onboarding — a missing one is an onboarding invariant violation, not a normal
+  case to handle gracefully). **This is expected and self-resolving**: once `subscription-service`'s
+  migration and `/internal/subscriptions` endpoint exist, the onboarding saga's existing call
+  succeeds, every new organisation gets its row, and `user-service`'s seat-limit transactions work
+  end to end with no code change on `user-service`'s side. Recorded here — rather than left to be
+  discovered as an unexplained 500 — because `user-service` is functionally complete and its own
+  tests pass; the gap is entirely in what has not been built yet, not in what has.
 
 **Migration sequencing for `core_db` (§14.2), decided during `user-service`'s implementation.**
 `subs.subscriptions` is created by `user-service`'s own migration — minimally shaped with only the
