@@ -180,12 +180,15 @@ export class UsersService {
     const ctx = this.tenantContext.getOrThrow();
     const organizationId = ctx.organizationId!;
 
-    const invitation = await this.invitations.findById(invitationId);
-    if (!invitation || invitation.acceptedAt || invitation.revokedAt) {
-      throw new NotFoundException();
-    }
-
     await this.tenantDataSource.transaction(async (manager) => {
+      // findById is RLS-scoped (§13.5) — it must run inside this SAME scoped
+      // transaction, never against the raw DataSource, or FORCE ROW LEVEL
+      // SECURITY makes it return null unconditionally (no app.current_org
+      // set on that connection at all), not just for a foreign tenant.
+      const invitation = await this.invitations.findById(invitationId, manager);
+      if (!invitation || invitation.acceptedAt || invitation.revokedAt) {
+        throw new NotFoundException();
+      }
       await this.seats.lockForUpdate(organizationId, manager);
       await this.invitations.markRevoked(invitationId, manager);
       await this.seats.adjustUsedSeats(organizationId, -1, manager);
@@ -199,20 +202,23 @@ export class UsersService {
     const ctx = this.tenantContext.getOrThrow();
     const organizationId = ctx.organizationId!;
 
-    const user = await this.users.findById(userId);
-    if (!user) throw new NotFoundException();
+    const updated = await this.tenantDataSource.transaction(async (manager) => {
+      // Same reasoning as revokeInvitation: every read/write here must run
+      // inside this scoped transaction, not against the raw DataSource.
+      const user = await this.users.findById(userId, manager);
+      if (!user) throw new NotFoundException();
 
-    if (user.role === UserRole.ORG_ADMIN && role !== UserRole.ORG_ADMIN) {
-      const adminCount = await this.tenantDataSource.transaction((manager) =>
-        this.users.countActiveAdmins(organizationId, manager),
-      );
-      if (adminCount <= 1) {
-        throw new LastAdminException();
+      if (user.role === UserRole.ORG_ADMIN && role !== UserRole.ORG_ADMIN) {
+        const adminCount = await this.users.countActiveAdmins(organizationId, manager);
+        if (adminCount <= 1) {
+          throw new LastAdminException();
+        }
       }
-    }
 
-    await this.users.updateRole(userId, role);
-    const updated = await this.users.findById(userId);
+      await this.users.updateRole(userId, role, manager);
+      return this.users.findById(userId, manager);
+    });
+
     await this.publishEvent(organizationId, EVENT_TYPES.USER_ROLE_CHANGED, { userId, role });
     return toUserDto(updated!);
   }
@@ -222,21 +228,20 @@ export class UsersService {
     const ctx = this.tenantContext.getOrThrow();
     const organizationId = ctx.organizationId!;
 
-    const user = await this.users.findById(userId);
-    if (!user || user.status === UserStatus.REMOVED) {
-      throw new NotFoundException();
-    }
-
-    if (user.role === UserRole.ORG_ADMIN) {
-      const adminCount = await this.tenantDataSource.transaction((manager) =>
-        this.users.countActiveAdmins(organizationId, manager),
-      );
-      if (adminCount <= 1) {
-        throw new LastAdminException();
-      }
-    }
-
     await this.tenantDataSource.transaction(async (manager) => {
+      // Same reasoning as revokeInvitation/updateRole above.
+      const user = await this.users.findById(userId, manager);
+      if (!user || user.status === UserStatus.REMOVED) {
+        throw new NotFoundException();
+      }
+
+      if (user.role === UserRole.ORG_ADMIN) {
+        const adminCount = await this.users.countActiveAdmins(organizationId, manager);
+        if (adminCount <= 1) {
+          throw new LastAdminException();
+        }
+      }
+
       await this.seats.lockForUpdate(organizationId, manager);
       await this.users.markRemoved(userId, manager);
       await this.seats.adjustUsedSeats(organizationId, -1, manager);

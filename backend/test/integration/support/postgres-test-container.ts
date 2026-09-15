@@ -26,7 +26,7 @@ export class PostgresTestContainer {
   private migratorDataSource!: DataSource;
   appDataSource!: DataSource;
 
-  async start(entities: EntityTarget[] = []): Promise<void> {
+  async start(entities: EntityTarget[] = [], schema?: string): Promise<void> {
     this.container = await new PostgreSqlContainer('postgres:17-alpine')
       .withDatabase('test_db')
       .withUsername('postgres')
@@ -73,6 +73,12 @@ export class PostgresTestContainer {
       type: 'postgres',
       url: appUri,
       synchronize: false,
+      // Mirrors each service's real app.module.ts: Postgres's default
+      // search_path ("$user", public) does not include custom schemas, so a
+      // caller exercising bare-named entities (User, Invitation, ...) must
+      // pass the same `schema` its production DataSource sets, or the
+      // resolution bug that setting fixes would go uncaught here too.
+      schema,
       entities,
     });
   }

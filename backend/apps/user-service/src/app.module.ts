@@ -47,9 +47,15 @@ import { HealthController } from './health.controller';
         username: config.getOrThrow<string>('APP_DB_USER'),
         password: config.getOrThrow<string>('APP_DB_PASSWORD'),
         database: config.getOrThrow<string>('CORE_DB_NAME'),
-        // §14.2: user-service's DataSource spans BOTH schemas it touches —
-        // its own (users) and the one narrow view into subs it is granted
-        // (SubscriptionSeatView, SELECT/UPDATE on subs.subscriptions only).
+        // Postgres's default search_path ("$user", public) does NOT include
+        // custom schemas — a bare @Entity('users') would fail to resolve
+        // against users.users without this. `schema` sets the DEFAULT for
+        // entities with no explicit schema (User, Invitation); an entity's
+        // own `schema:` still wins over it, which is exactly how
+        // SubscriptionSeatView's explicit `{ schema: 'subs' }` keeps
+        // resolving to the OTHER schema this DataSource spans (§14.2) —
+        // empirically verified against a real Postgres container.
+        schema: 'users',
         entities: [User, Invitation, SubscriptionSeatView],
         synchronize: false, // §15.1 — never true, would drop RLS policies elsewhere
         migrationsRun: false,

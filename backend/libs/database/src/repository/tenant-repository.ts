@@ -1,4 +1,4 @@
-import { EntityManager, FindOptionsWhere, Repository } from 'typeorm';
+import { EntityManager, EntityTarget, FindOptionsWhere } from 'typeorm';
 import { TenantContextStore } from '@app/tenant-context';
 import { TenantBaseEntity } from '../entities/tenant-base.entity';
 
@@ -12,12 +12,20 @@ import { TenantBaseEntity } from '../entities/tenant-base.entity';
  *   2. defence in depth — two independent mechanisms must both fail for a leak
  *      to occur.
  *
- * Every method still runs inside a transaction opened by TenantAwareDataSource,
- * so app.current_org is always set and RLS filters the result regardless of
- * whether this class added its own predicate correctly.
+ * `manager` is REQUIRED on every method (§32.4) — this class used to fall back
+ * to an injected, unscoped `repository` getter when no manager was passed,
+ * the exact "optional manager silently hits the raw DataSource" landmine that
+ * produced several real defects elsewhere in this codebase (found once a real
+ * Postgres-backed integration test finally exercised those paths). This base
+ * class had the identical bug in code no subclass happened to call yet —
+ * removing the fallback here means every future subclass inherits the fix
+ * instead of inheriting the landmine. The caller must always come from a
+ * transaction opened by TenantAwareDataSource, so app.current_org is always
+ * set and RLS filters the result regardless of whether this class's own
+ * predicate is correct.
  */
 export abstract class TenantRepository<T extends TenantBaseEntity> {
-  protected abstract get repository(): Repository<T>;
+  protected abstract readonly entityTarget: EntityTarget<T>;
 
   constructor(protected readonly tenantContext: TenantContextStore) {}
 
@@ -32,16 +40,14 @@ export abstract class TenantRepository<T extends TenantBaseEntity> {
     return ctx.organizationId;
   }
 
-  async findById(id: string, manager?: EntityManager): Promise<T | null> {
-    const repo = manager ? manager.getRepository<T>(this.repository.target) : this.repository;
-    return repo.findOne({
+  async findById(id: string, manager: EntityManager): Promise<T | null> {
+    return manager.getRepository(this.entityTarget).findOne({
       where: { id, organizationId: this.organizationId } as FindOptionsWhere<T>,
     });
   }
 
-  async save(entity: Partial<T>, manager?: EntityManager): Promise<T> {
-    const repo = manager ? manager.getRepository<T>(this.repository.target) : this.repository;
+  async save(entity: Partial<T>, manager: EntityManager): Promise<T> {
     const withTenant = { ...entity, organizationId: this.organizationId };
-    return repo.save(withTenant as T);
+    return manager.getRepository(this.entityTarget).save(withTenant as T);
   }
 }

@@ -6,7 +6,7 @@ export const USER_REPOSITORY = Symbol('USER_REPOSITORY');
 
 export interface IUserRepository {
   /** RLS-scoped via TenantAwareDataSource — never returns a foreign-tenant row (§13.5). */
-  findById(id: string, manager?: EntityManager): Promise<User | null>;
+  findById(id: string, manager: EntityManager): Promise<User | null>;
   /** §19.2: counted toward used_seats. Excludes REMOVED users. */
   countActive(organizationId: string, manager: EntityManager): Promise<number>;
   countActiveAdmins(organizationId: string, manager: EntityManager): Promise<number>;
@@ -40,9 +40,9 @@ export interface IUserRepository {
     manager: EntityManager,
   ): Promise<User>;
   markRemoved(id: string, manager: EntityManager): Promise<void>;
-  updateRole(id: string, role: UserRole, manager?: EntityManager): Promise<void>;
-  /** §29: keyset pagination — never OFFSET. */
-  listPage(query: CursorQuery): Promise<CursorPage<User>>;
+  updateRole(id: string, role: UserRole, manager: EntityManager): Promise<void>;
+  /** §29: keyset pagination — never OFFSET. RLS-scoped; must run inside a scoped transaction. */
+  listPage(query: CursorQuery, manager: EntityManager): Promise<CursorPage<User>>;
   /** §11 dependency: auth-service reads this at login/refresh (§9.2). */
   findRoleByUserId(userId: string): Promise<UserRole | null>;
 }

@@ -4,18 +4,25 @@ import { TenantContextStore } from '@app/tenant-context';
 
 /**
  * The single point through which tenant scoping is applied to the database
- * (§13.5, §15.3). Every transaction opened through this class has
- * `SET LOCAL app.current_org = <orgId>` issued before the callback runs, which is
+ * (§13.5, §15.3). Every transaction opened through this class scopes
+ * `app.current_org` to the current org before the callback runs, which is
  * what makes PostgreSQL's RLS policies filter every query automatically —
  * including a raw SQL query with no WHERE clause at all (§13.1's central claim).
  *
- * `SET LOCAL` (never `SET`) is deliberate: SET LOCAL is transaction-scoped, so it
- * cannot leak across a pooled connection onto a later, differently-scoped request
- * — the single most dangerous failure mode of this pattern (§13.5).
+ * Scoping is done via `SELECT set_config('app.current_org', $1, true)`, NOT
+ * `SET LOCAL app.current_org = $1` — PostgreSQL's `SET`/`SET LOCAL` statements
+ * do not accept bind parameters at all (`syntax error at or near "$1"`,
+ * verified against a real Postgres container), so the literal-interpolation
+ * form this class used to use would have been the only alternative, and
+ * organizationId is not a value to interpolate into SQL text. `set_config`'s
+ * third argument (`true` = local) gives the exact same transaction-scoping
+ * guarantee `SET LOCAL` does — it cannot leak across a pooled connection onto
+ * a later, differently-scoped request, the single most dangerous failure mode
+ * of this pattern (§13.5) — while accepting a normal parameterized argument.
  *
  * A read-only query outside an explicit transaction is wrapped in an implicit one
- * for the same reason: SET LOCAL requires a transaction to be scoped to, and there
- * must be no code path where the variable is left unset.
+ * for the same reason: this scoping requires a transaction to apply "local" to, and
+ * there must be no code path where the variable is left unset.
  */
 @Injectable()
 export class TenantAwareDataSource {
@@ -90,7 +97,7 @@ export class TenantAwareDataSource {
     await queryRunner.startTransaction();
     try {
       const setScope = async (organizationId: string): Promise<void> => {
-        await queryRunner.query('SET LOCAL app.current_org = $1', [organizationId]);
+        await queryRunner.query("SELECT set_config('app.current_org', $1, true)", [organizationId]);
       };
       const result = await work(queryRunner.manager, setScope);
       await queryRunner.commitTransaction();
@@ -118,7 +125,7 @@ export class TenantAwareDataSource {
         // application code — it falls out of the policy definition itself.
         this.logger.debug('Scoped transaction with no organizationId (platform admin context)');
       } else {
-        await queryRunner.query('SET LOCAL app.current_org = $1', [organizationId]);
+        await queryRunner.query("SELECT set_config('app.current_org', $1, true)", [organizationId]);
       }
       const result = await work(queryRunner.manager);
       await queryRunner.commitTransaction();

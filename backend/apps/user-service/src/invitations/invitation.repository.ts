@@ -1,25 +1,26 @@
 import { Injectable } from '@nestjs/common';
-import { DataSource, EntityManager, IsNull, LessThanOrEqual, MoreThan, In } from 'typeorm';
+import { EntityManager, IsNull, LessThanOrEqual, MoreThan, In } from 'typeorm';
 import { TenantContextStore } from '@app/tenant-context';
 import { TenantRepository } from '@app/database';
 import { Invitation } from './invitation.entity';
 import type { UserRole } from '../users/user.entity';
 import type { IInvitationRepository } from './invitation.repository.interface';
 
+/**
+ * §32.4: every method takes a REQUIRED `manager` from a
+ * TenantAwareDataSource-scoped transaction — no fallback to a raw, unscoped
+ * DataSource, so a caller that forgets to scope a query fails at the type
+ * level rather than silently returning nothing under FORCE ROW LEVEL SECURITY.
+ */
 @Injectable()
 export class InvitationRepository
   extends TenantRepository<Invitation>
   implements IInvitationRepository
 {
-  constructor(
-    private readonly dataSource: DataSource,
-    tenantContext: TenantContextStore,
-  ) {
-    super(tenantContext);
-  }
+  protected readonly entityTarget = Invitation;
 
-  protected get repository() {
-    return this.dataSource.getRepository(Invitation);
+  constructor(tenantContext: TenantContextStore) {
+    super(tenantContext);
   }
 
   /**
@@ -69,9 +70,10 @@ export class InvitationRepository
     await manager.getRepository(Invitation).update({ id }, { acceptedAt: new Date() });
   }
 
-  async findById(id: string, manager?: EntityManager): Promise<Invitation | null> {
-    const repo = manager ? manager.getRepository(Invitation) : this.repository;
-    return repo.findOne({ where: { id, organizationId: this.organizationId } });
+  async findById(id: string, manager: EntityManager): Promise<Invitation | null> {
+    return manager
+      .getRepository(Invitation)
+      .findOne({ where: { id, organizationId: this.organizationId } });
   }
 
   async markRevoked(id: string, manager: EntityManager): Promise<void> {

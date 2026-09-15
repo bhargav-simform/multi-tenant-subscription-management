@@ -20,7 +20,7 @@ export interface IInvitationRepository {
     manager: EntityManager,
   ): Promise<Invitation | null>;
   markAccepted(id: string, manager: EntityManager): Promise<void>;
-  findById(id: string, manager?: EntityManager): Promise<Invitation | null>;
+  findById(id: string, manager: EntityManager): Promise<Invitation | null>;
   markRevoked(id: string, manager: EntityManager): Promise<void>;
   /** §19.9: the sweep's target set. Locks nothing itself — the sweep locks the subscription row. */
   findExpiredIds(organizationId: string, manager: EntityManager): Promise<string[]>;

@@ -1041,11 +1041,15 @@ another tenant — so a malicious or buggy write cannot plant data in Org B eith
 transaction, from the ALS context:
 
 ```sql
-SET LOCAL app.current_org = '<orgId>';
+SELECT set_config('app.current_org', '<orgId>', true);
 ```
 
-`SET LOCAL` is transaction-scoped, so it cannot leak across pooled connections — the single most
-dangerous failure mode of this pattern, and the reason `SET` is never used.
+Not `SET LOCAL app.current_org = $1` — PostgreSQL's `SET`/`SET LOCAL` statements do not accept bind
+parameters at all (§32.4 records this as a real defect, caught only once a real Postgres-backed
+integration test finally exercised this exact code path). `set_config`'s third argument (`true` =
+local) gives the identical transaction-scoping guarantee: it cannot leak across pooled connections —
+the single most dangerous failure mode of this pattern — while still accepting a normal parameterized
+argument, so `organizationId` is never interpolated into SQL text.
 
 **The database role matters.** Services connect as `app_user`, which:
 
@@ -1196,10 +1200,16 @@ graded; database-per-service is not.
   property is `NOSUPERUSER`/`NOBYPASSRLS` (so RLS cannot be bypassed by any service, §13.8 check #2)
   — it is not that each service gets its own distinct role. The boundary between `user-service` and
   `subscription-service` is enforced by **grant scope, applied per-table, per-migration**, not by
-  separate credentials: `app_user`'s access to `subs.subscriptions` is `SELECT`/`UPDATE` **and
-  nothing else** in `subs`, granted explicitly by user-service's own migration (never a blanket
-  `ALTER DEFAULT PRIVILEGES ... IN SCHEMA subs`, which would hand user-service's connection full CRUD
-  on every table subscription-service ever creates there).
+  separate credentials: **user-service's own migration** grants `app_user` `SELECT`/`UPDATE` on
+  `subs.subscriptions` **and nothing else** in `subs` — that is the narrow slice user-service's code
+  actually calls (§19.4's seat-changing transactions read and adjust `used_seats`, never insert or
+  delete a row). `subscription-service` *owns* `subs.subscriptions` — it creates the row during
+  onboarding and updates the plan/limit columns on a downgrade — so its own migration additionally
+  grants `INSERT` on the same table. Because both services connect as the one shared `app_user`,
+  these grants are additive at the role level; the boundary that matters is which repository, in
+  which service's code, issues which verb — never a blanket `ALTER DEFAULT PRIVILEGES ... IN SCHEMA
+  subs`, which would hand either connection full CRUD on every table the other service ever creates
+  there (§32.4 records a defect where exactly that grant shape had to be removed).
 - That grant exists for the **seat-enforcement transactions in §19, and only those**. They are
   enumerated in §19.4: invite, accept, revoke, remove, expire, and the downgrade check. Every one
   locks the same subscription row; together they maintain the `used_seats` invariant. Any *other*
@@ -1326,16 +1336,18 @@ new table — the same column the RLS policy and the CI check both look for.
 
 The single point through which tenant scoping is applied:
 
-- Wraps `DataSource.transaction()`; issues `SET LOCAL app.current_org = $1` from the ALS context
-  before running the callback.
+- Wraps `DataSource.transaction()`; issues `SELECT set_config('app.current_org', $1, true)` from the
+  ALS context before running the callback (not `SET LOCAL app.current_org = $1` — see §32.4;
+  Postgres's `SET`/`SET LOCAL` reject bind parameters entirely, `set_config`'s third argument gives
+  the identical transaction-local scoping).
 - Refuses to open a transaction when tenant context is absent **and** the caller has not explicitly
   declared a global operation (`runGlobal()`, used only by migrations, the plan catalogue, and
   Kafka consumers before they establish their own scope).
 - Applies to `QueryRunner` access, so raw SQL is covered identically.
 
-Read-only queries outside an explicit transaction are wrapped in an implicit one, because
-`SET LOCAL` requires a transaction to be scoped to. The small cost of an extra `BEGIN`/`COMMIT` on
-simple reads buys the guarantee that there is no code path where the variable is unset.
+Read-only queries outside an explicit transaction are wrapped in an implicit one, because this
+scoping call requires a transaction to apply "local" to. The small cost of an extra `BEGIN`/`COMMIT`
+on simple reads buys the guarantee that there is no code path where the variable is unset.
 
 **A fourth method, `transactionWithDeferredScope()`, for the one case where the organisation is not
 known until partway through a transaction.** Invitation acceptance (§19.8) is the case: the caller
@@ -2627,9 +2639,9 @@ nothing in the brief's requirements depends on the framework or ORM it happened 
 
 ### 32.3 Implementation-phase tracked gaps
 
-Three gaps surfaced during implementation that cannot be closed until a *later*
-service exists — they are cross-service wiring, not an auth-service defect, and are tracked here so
-they are not silently forgotten once the services that close them are built.
+Gaps surfaced during implementation that cannot be closed until a *later* service exists, or that
+were deliberately deferred as a stated limitation rather than built now — tracked here so they are
+not silently forgotten.
 
 - **Suspended-organisation login is not yet blocked.** §11.2 lists "reject if
   `organization.status != 'active'`" as a login step. `auth-service` has no synchronous or cached
@@ -2646,20 +2658,22 @@ they are not silently forgotten once the services that close them are built.
   `JwtStrategy` are already built — §16.2 use #2 — but nothing calls `deny()` yet, since the gateway
   itself is not built). Close this when `api-gateway`'s logout route is implemented: it must call
   `RedisTokenDenylist.deny(jti, remainingTtl)` before or alongside forwarding to `auth-service`.
-- **No `subs.subscriptions` row can exist until `subscription-service` is built — every §19
-  seat-changing operation returns 500 until then, by design of the build order.**
-  `tenant-service`'s onboarding saga calls `POST /internal/subscriptions` on `subscription-service`
-  during `assignDefaultPlan` (§30.1's `SUBSCRIBED` step) to create that row; until that service
-  exists, no organisation ever gets one, and `user-service`'s `SubscriptionSeatRepository.lockForUpdate`
-  correctly throws `InternalServerErrorException` for a missing row rather than silently treating a
-  missing row as "unlimited" or "zero" (§8.3: every organisation is guaranteed exactly one
-  subscription row by onboarding — a missing one is an onboarding invariant violation, not a normal
-  case to handle gracefully). **This is expected and self-resolving**: once `subscription-service`'s
-  migration and `/internal/subscriptions` endpoint exist, the onboarding saga's existing call
-  succeeds, every new organisation gets its row, and `user-service`'s seat-limit transactions work
-  end to end with no code change on `user-service`'s side. Recorded here — rather than left to be
-  discovered as an unexplained 500 — because `user-service` is functionally complete and its own
-  tests pass; the gap is entirely in what has not been built yet, not in what has.
+- ~~No `subs.subscriptions` row can exist until `subscription-service` is built~~ — **RESOLVED.**
+  `subscription-service`'s `assignDefaultPlan` (§8.5) now creates that row during onboarding's
+  `SUBSCRIBED` step. `user-service`'s seat-limit transactions, built and tested against the row
+  before this service existed (§32.4), work unchanged now that the row is genuinely created.
+- **Real seat-`used_seats` drift detection is not built — only a missing-row alarm is.** §19.4
+  describes drift detection as comparing the *stored* `used_seats` against a freshly recomputed
+  count. Building that inside `subscription-service` would require it to read
+  `users.users`/`users.invitations` directly — technically possible (both services share one
+  `app_user` role across all of `core_db`, §14.2) but exactly the cross-schema violation §14.2
+  forbids ("neither service reads the other's tables for ordinary queries"). What exists instead
+  (`MissingSubscriptionAlarmConsumer`, §8.5) confirms a subscription row exists whenever a
+  seat-affecting event arrives, and alarms if not — a narrower, honestly-named guarantee. Real drift
+  detection needs either: (a) `user-service` publishes its own computed seat count in each
+  seat-affecting event's payload, and `subscription-service` compares it against `used_seats`; or
+  (b) a scheduled job *inside* `user-service` itself, which already owns both the counter and the
+  tables that would recompute it. Neither is built.
 
 **Migration sequencing for `core_db` (§14.2), decided during `user-service`'s implementation.**
 `subs.subscriptions` is created by `user-service`'s own migration — minimally shaped with only the
@@ -2710,6 +2724,92 @@ later service could reintroduce if the reason it was wrong is forgotten.
   `SELECT`/`UPDATE` on `subs.subscriptions` alone that §14.2 promises. Fixed by removing the
   schema-wide default-privilege grant and applying the one specific table grant from
   `user-service`'s own migration instead, where it is reviewable next to the table it names.
+- **`TenantAwareDataSource` issued `SET LOCAL app.current_org = $1` with a bind parameter** —
+  PostgreSQL's `SET`/`SET LOCAL` statements do not accept bind parameters at all (`syntax error at
+  or near "$1"`, confirmed against a real Postgres container). This is the single most load-bearing
+  line in the entire tenant-isolation design (§13.5, §15.3) — `transaction()`,
+  `transactionForOrganization()`, and `transactionWithDeferredScope()` all went through it — and it
+  had never actually been exercised against a real database in any existing test: the seat-lock
+  integration suite (§28.1) calls `SubscriptionSeatRepository` methods directly against raw query
+  runners, bypassing this class entirely, and every unit test uses a fake `TenantAwareDataSource`.
+  Fixed by switching to `SELECT set_config('app.current_org', $1, true)`, which accepts a normal
+  parameterized argument and gives the identical transaction-local scoping guarantee (`true` = local)
+  that `SET LOCAL` does. The lesson generalises the same way the unsigned-HTTP defect above did: a
+  class every service depends on for its core safety guarantee had a codepath no test had ever
+  actually run end-to-end against real Postgres, only against a fake standing in for it.
+- **Bare, unqualified `@Entity('tablename')` declarations could not resolve against `core_db`'s
+  custom schemas.** PostgreSQL's default `search_path` for a role with no explicit `ALTER ROLE`
+  (exactly `app_user`, in every environment) is `"$user", public` — it does not include `users` or
+  `subs`. `user-service`'s `User`/`Invitation` entities and `subscription-service`'s `Plan`/
+  `Subscription`/`SubscriptionHistory` entities all used bare names, meaning every query against them
+  would fail with "relation does not exist" against a real, non-superuser-owned database — confirmed
+  empirically with a real Postgres container. `user-service`'s own `SubscriptionSeatView` was
+  unaffected only because it already carried an explicit `{ schema: 'subs' }`. Fixed by setting the
+  TypeOrmModule `schema` option (`'users'` / `'subs'`) at the DataSource level in each service's
+  `app.module.ts` — this sets the *default* schema for any entity with no explicit `schema` of its
+  own, while an entity's own explicit `schema` (as `SubscriptionSeatView` already had) still
+  overrides it; both behaviours were verified against a real Postgres container before applying the
+  fix. This was a latent bug in already-committed, already-reviewed `user-service` code, not just the
+  in-progress `subscription-service` — caught only because the existing integration suite exercised
+  `SubscriptionSeatView` (self-qualifying) and never `User`/`Invitation` directly. A new regression
+  test (`test/integration/user-service/entity-schema-resolution.integration.spec.ts`) now exercises
+  `User` through the real `TenantAwareDataSource` + RLS path specifically to close that gap.
+- **`UsersService.updateRole`/`removeUser`/`revokeInvitation` called `findById` with no transaction
+  manager**, reading against the raw injected `DataSource` rather than through
+  `TenantAwareDataSource`. Discovered while building the regression test above: under `FORCE ROW
+  LEVEL SECURITY`, a connection with `app.current_org` unset returns zero rows unconditionally
+  (§13.6), so these three methods would have returned 404/silently-failed for every user, in every
+  organization, in production — not a tenant-isolation leak, but a total functional break, invisible
+  to every existing test because the unit-test fakes never model RLS and no integration test had
+  called these specific methods. Fixed by moving each method's reads and writes inside a single
+  `this.tenantDataSource.transaction(...)` block, passing the resulting `manager` to every repository
+  call — matching the pattern every other seat-changing method in this file already used. New unit
+  tests were added for both methods' not-found and last-admin-protection branches, which had zero
+  coverage before (the pre-existing mocks defaulted `findById` to `null` and no test overrode it).
+- **The same "unscoped `findById`" bug class, found independently by a guardian review pass over the
+  three fixes above, existed in two more places the first pass missed**: `UsersReadService.getById`/
+  `.listPage` (the `GET /users/:id` and `GET /users` handlers — `IUserRepository.findById`/`listPage`
+  fell back to the raw `DataSource` exactly like the already-fixed `UsersService` methods, so these
+  routes would 404/return-empty for every user in every org, not just a foreign one — the class's own
+  doc comment incorrectly asserted RLS scoping happened "via TenantRepository", which only
+  auto-injects the `organizationId` filter and does not set `app.current_org` on the connection at
+  all), and `SubscriptionsService.getCurrent()` (identical shape — `findByOrganizationId` called with
+  no manager). The `getCurrent()` case is worse than a plain 404: `changePlan()` ends by calling
+  `getCurrent()`, so a plan change that locks the row, writes it, records history, commits, and
+  publishes `SUBSCRIPTION_CHANGED` to Kafka would still surface as a 404 to the caller — a real
+  operation succeeds but is reported as failed, and is not safe to blindly retry because it already
+  published its event (§17.5). Fixed the same way: `UsersReadService` now opens a
+  `TenantAwareDataSource.transaction(...)` for every read (its constructor doc comment's claim that
+  "these never need a transaction" was the root misunderstanding — they need one purely to get
+  `app.current_org` set, independent of ACID concerns), and `IUserRepository.listPage` gained a
+  required `manager` parameter so its query builder can no longer silently default to the raw
+  `DataSource`. `SubscriptionsService.getCurrent()` now wraps its `findByOrganizationId` + `findById`
+  reads in one `tenantDataSource.transaction(...)`. `SubscriptionRepository.findByOrganizationId`'s
+  optional-manager fallback was removed entirely (the parameter is now required), so a future caller
+  that forgets to scope it fails at the type level rather than silently returning nothing at runtime.
+  `PlanRepository` (a GLOBAL table, so not an RLS issue, but affected by the same schema-resolution
+  bug) was also routed through `TenantAwareDataSource.runGlobal()` instead of a directly-injected
+  `DataSource`, so each service now has exactly one database entry point — never a second, raw one
+  a future method could reach for by mistake. Two new integration tests
+  (`test/integration/user-service/entity-schema-resolution.integration.spec.ts`, extended to cover
+  `Invitation` alongside `User` and rewritten to use the real `enableTenantRls()` helper rather than
+  hand-rolled DDL; and the new
+  `test/integration/subscription-service/schema-resolution-and-rls.integration.spec.ts`) exercise
+  `getCurrent()` and both entities' real resolution end-to-end. The pattern across every defect in
+  this section is the same: a method with an *optional* manager parameter that quietly falls back to
+  an unscoped connection is a landmine — the fix that actually prevents recurrence is making the
+  parameter required wherever the caller has no legitimate unscoped use case, not just remembering to
+  pass it correctly at each call site. Following that principle to its source: `libs/database`'s
+  shared `TenantRepository` base class — which `UserRepository` and `InvitationRepository` both
+  extend, and which every future service's tenant-scoped repository is meant to extend — had the
+  IDENTICAL optional-manager-falls-back-to-an-injected-unscoped-repository bug in its own `findById`/
+  `save` methods. Neither existing subclass happened to call them (both fully override `findById`,
+  neither uses `save`), so it was dead code rather than a live defect, but it would have silently
+  reintroduced this exact bug class in the very first new service to inherit and use it unmodified.
+  Fixed at the base class: `manager` is now required on both methods, and the previous
+  `protected abstract get repository()` escape hatch was removed entirely in favour of a
+  `protected abstract readonly entityTarget` every subclass sets once, so there is no longer any
+  code path in this shared class capable of reaching an unscoped connection.
 
 ---
 

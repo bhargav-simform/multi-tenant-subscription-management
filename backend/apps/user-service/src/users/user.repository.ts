@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { DataSource, EntityManager } from 'typeorm';
+import { EntityManager } from 'typeorm';
 import type { CursorPage, CursorQuery } from '@app/common';
 import { TenantContextStore } from '@app/tenant-context';
 import { TenantAwareDataSource, TenantRepository } from '@app/database';
@@ -12,25 +12,27 @@ const DEFAULT_PAGE_SIZE = 20;
  * §13.5: extends TenantRepository, so every read/write is scoped to
  * organizationId as a matter of application code — RLS is the structural
  * guarantee underneath (§13.5's "second mechanism"), this is the readable
- * defence-in-depth layer on top of it.
+ * defence-in-depth layer on top of it. Every method takes a REQUIRED
+ * `manager` from a TenantAwareDataSource-scoped transaction (§32.4) — there
+ * is deliberately no fallback to a raw, unscoped DataSource, so a caller
+ * that forgets to scope a query fails at the type level, not silently at
+ * runtime under FORCE ROW LEVEL SECURITY.
  */
 @Injectable()
 export class UserRepository extends TenantRepository<User> implements IUserRepository {
+  protected readonly entityTarget = User;
+
   constructor(
-    private readonly dataSource: DataSource,
     private readonly tenantAwareDataSource: TenantAwareDataSource,
     tenantContext: TenantContextStore,
   ) {
     super(tenantContext);
   }
 
-  protected get repository() {
-    return this.dataSource.getRepository(User);
-  }
-
-  async findById(id: string, manager?: EntityManager): Promise<User | null> {
-    const repo = manager ? manager.getRepository(User) : this.repository;
-    return repo.findOne({ where: { id, organizationId: this.organizationId } });
+  async findById(id: string, manager: EntityManager): Promise<User | null> {
+    return manager
+      .getRepository(User)
+      .findOne({ where: { id, organizationId: this.organizationId } });
   }
 
   async countActive(organizationId: string, manager: EntityManager): Promise<number> {
@@ -67,15 +69,17 @@ export class UserRepository extends TenantRepository<User> implements IUserRepos
       .update({ id, organizationId: this.organizationId }, { status: UserStatus.REMOVED });
   }
 
-  async updateRole(id: string, role: UserRole, manager?: EntityManager): Promise<void> {
-    const repo = manager ? manager.getRepository(User) : this.repository;
-    await repo.update({ id, organizationId: this.organizationId }, { role });
+  async updateRole(id: string, role: UserRole, manager: EntityManager): Promise<void> {
+    await manager
+      .getRepository(User)
+      .update({ id, organizationId: this.organizationId }, { role });
   }
 
   /** §29: keyset pagination — never OFFSET. */
-  async listPage(query: CursorQuery): Promise<CursorPage<User>> {
+  async listPage(query: CursorQuery, manager: EntityManager): Promise<CursorPage<User>> {
     const limit = Math.min(query.limit ?? DEFAULT_PAGE_SIZE, 100);
-    const qb = this.repository
+    const qb = manager
+      .getRepository(User)
       .createQueryBuilder('u')
       .where('u.organizationId = :organizationId', { organizationId: this.organizationId })
       .andWhere("u.status <> 'removed'")

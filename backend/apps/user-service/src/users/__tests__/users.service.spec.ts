@@ -1,15 +1,15 @@
 import { jest, describe, it, expect, beforeEach } from '@jest/globals';
 import { Test } from '@nestjs/testing';
-import { GoneException } from '@nestjs/common';
+import { GoneException, NotFoundException } from '@nestjs/common';
 import { TenantAwareDataSource } from '@app/database';
 import { TenantContextStore } from '@app/tenant-context';
 import { EventPublisher } from '@app/kafka';
-import { EVENT_TYPES, Role } from '@app/common';
+import { EVENT_TYPES, Role, LastAdminException } from '@app/common';
 import { UsersService } from '../users.service';
 import { USER_REPOSITORY } from '../user.repository.interface';
 import { INVITATION_REPOSITORY } from '../../invitations/invitation.repository.interface';
 import { SUBSCRIPTION_SEAT_REPOSITORY } from '../../subscriptions/subscription-seat.repository.interface';
-import { UserRole } from '../user.entity';
+import { UserRole, UserStatus } from '../user.entity';
 import type { User } from '../user.entity';
 import type { Invitation } from '../../invitations/invitation.entity';
 import type { SeatSnapshot } from '../../subscriptions/subscription-seat.repository.interface';
@@ -102,7 +102,7 @@ describe('UsersService', () => {
     const pendingInvitationsByOrg = new Map<string, number>([[ORG_ID, 0]]);
 
     const users = {
-      findById: jest.fn<() => Promise<User | null>>().mockResolvedValue(null),
+      findById: jest.fn<(id: string, manager?: unknown) => Promise<User | null>>().mockResolvedValue(null),
       countActive: jest
         .fn<(organizationId: string) => Promise<number>>()
         .mockImplementation(async (organizationId) => activeUsersByOrg.get(organizationId) ?? 0),
@@ -124,8 +124,10 @@ describe('UsersService', () => {
             deletedAt: null,
           } as User;
         }),
-      markRemoved: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
-      updateRole: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
+      markRemoved: jest.fn<(id: string, manager: unknown) => Promise<void>>().mockResolvedValue(undefined),
+      updateRole: jest
+        .fn<(id: string, role: UserRole, manager?: unknown) => Promise<void>>()
+        .mockResolvedValue(undefined),
       listPage: jest.fn(),
       findRoleByUserId: jest.fn<() => Promise<UserRole | null>>().mockResolvedValue(null),
     };
@@ -144,7 +146,7 @@ describe('UsersService', () => {
         .fn<(tokenHash: string, manager: unknown) => Promise<Invitation | null>>()
         .mockResolvedValue(null),
       markAccepted: jest.fn<(id: string, manager: unknown) => Promise<void>>().mockResolvedValue(undefined),
-      findById: jest.fn<() => Promise<Invitation | null>>().mockResolvedValue(null),
+      findById: jest.fn<(id: string, manager?: unknown) => Promise<Invitation | null>>().mockResolvedValue(null),
       markRevoked: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
       findExpiredIds: jest.fn<() => Promise<string[]>>().mockResolvedValue([]),
       markManyExpired: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
@@ -342,5 +344,101 @@ describe('UsersService', () => {
     await expect(
       service.acceptInvitation('raw-token', { firstName: 'A', lastName: 'B' }),
     ).rejects.toBeInstanceOf(GoneException);
+  });
+
+  /**
+   * Regression coverage for a real bug: updateRole/removeUser/revokeInvitation
+   * used to call `findById` with no manager, against the raw DataSource
+   * outside any RLS-scoped transaction — under FORCE ROW LEVEL SECURITY that
+   * always returns null in production, not just for a foreign tenant. These
+   * tests set the mock to something OTHER than the default `null` specifically
+   * to prove the service's own not-found/last-admin logic is reachable at all.
+   */
+  describe('updateRole / removeUser', () => {
+    function activeUser(overrides: Partial<User> = {}): User {
+      return {
+        id: 'user-1',
+        organizationId: ORG_ID,
+        email: 'member@acme.test',
+        firstName: 'M',
+        lastName: 'B',
+        role: UserRole.ORG_MEMBER,
+        status: UserStatus.ACTIVE,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        deletedAt: null,
+        ...overrides,
+      } as User;
+    }
+
+    it('updateRole throws NotFoundException when the user does not exist', async () => {
+      const seatRepo = new FakeSeatRepository();
+      const { service, tenantContext, users } = await buildService(seatRepo);
+      users.findById.mockResolvedValue(null);
+
+      await expect(
+        tenantContext.run(buildContext(), () => service.updateRole('missing-user', UserRole.ORG_MEMBER)),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('updateRole blocks demoting the last remaining admin', async () => {
+      const seatRepo = new FakeSeatRepository();
+      const { service, tenantContext, users } = await buildService(seatRepo);
+      users.findById.mockResolvedValue(activeUser({ role: UserRole.ORG_ADMIN }));
+      users.countActiveAdmins.mockResolvedValue(1);
+
+      await expect(
+        tenantContext.run(buildContext(), () => service.updateRole('user-1', UserRole.ORG_MEMBER)),
+      ).rejects.toBeInstanceOf(LastAdminException);
+      expect(users.updateRole).not.toHaveBeenCalled();
+    });
+
+    it('updateRole allows demoting an admin when another admin remains', async () => {
+      const seatRepo = new FakeSeatRepository();
+      const { service, tenantContext, users } = await buildService(seatRepo);
+      users.findById.mockResolvedValue(activeUser({ role: UserRole.ORG_ADMIN }));
+      users.countActiveAdmins.mockResolvedValue(2);
+
+      const result = await tenantContext.run(buildContext(), () =>
+        service.updateRole('user-1', UserRole.ORG_MEMBER),
+      );
+
+      expect(users.updateRole).toHaveBeenCalledWith('user-1', UserRole.ORG_MEMBER, expect.anything());
+      expect(result.id).toBe('user-1');
+    });
+
+    it('removeUser throws NotFoundException for an already-removed user', async () => {
+      const seatRepo = new FakeSeatRepository();
+      const { service, tenantContext, users } = await buildService(seatRepo);
+      users.findById.mockResolvedValue(activeUser({ status: UserStatus.REMOVED }));
+
+      await expect(
+        tenantContext.run(buildContext(), () => service.removeUser('user-1')),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('removeUser blocks removing the last remaining admin', async () => {
+      const seatRepo = new FakeSeatRepository();
+      const { service, tenantContext, users } = await buildService(seatRepo);
+      users.findById.mockResolvedValue(activeUser({ role: UserRole.ORG_ADMIN }));
+      users.countActiveAdmins.mockResolvedValue(1);
+
+      await expect(
+        tenantContext.run(buildContext(), () => service.removeUser('user-1')),
+      ).rejects.toBeInstanceOf(LastAdminException);
+      expect(users.markRemoved).not.toHaveBeenCalled();
+    });
+
+    it('removeUser frees a seat when removing a non-last-admin user', async () => {
+      const seatRepo = new FakeSeatRepository();
+      seatRepo.usedSeats = 1;
+      const { service, tenantContext, users } = await buildService(seatRepo);
+      users.findById.mockResolvedValue(activeUser());
+
+      await tenantContext.run(buildContext(), () => service.removeUser('user-1'));
+
+      expect(users.markRemoved).toHaveBeenCalledWith('user-1', expect.anything());
+      expect(seatRepo.usedSeats).toBe(0);
+    });
   });
 });
