@@ -5,9 +5,12 @@ import { IS_PUBLIC_KEY } from './public.decorator';
 
 /**
  * Registered as a global APP_GUARD in api-gateway ONLY (§11.5). Routes are
- * authenticated by default; @Public() is required to opt out. Exactly three
+ * authenticated by default; @Public() is required to opt out. Four business
  * routes carry it in the whole system: /onboarding/signup, /auth/login,
- * /invitations/:token/accept.
+ * /auth/refresh (a valid ACCESS token is exactly what this route can't
+ * require — it exists because the caller's expired), and
+ * /invitations/:token/accept. (/health and /health/ready are exempted
+ * separately, on §26.4's grounds, not this decorator.)
  */
 @Injectable()
 export class JwtAuthGuard extends AuthGuard('jwt') {

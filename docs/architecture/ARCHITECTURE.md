@@ -332,7 +332,9 @@ of its own, and giving it any would be business logic.
 
 **Why this boundary is right for the POC.** The brief demands there be "no anonymous path through
 this system beyond the onboarding/signup flow itself". A single gateway makes that claim auditable:
-exactly three routes are marked `@Public()`, and they are visible in one file.
+exactly four business routes are marked `@Public()` (§11.5), and they are visible in one file —
+plus the two health-check paths, exempted on separate, narrower grounds (§26.4) and excluded from
+this count since they carry no business logic and return only a liveness/readiness boolean.
 
 **Hard rule.** No business logic. No database. No entity. If a change to the gateway requires
 knowing what a subscription *is*, it belongs downstream.
@@ -739,7 +741,7 @@ mints a token. `api-gateway` *verifies* tokens but never issues them.
 Browser  POST /api/v1/auth/login { email, password }
    │
    ├─ gateway: helmet → CORS → throttler (strict bucket on this route) → correlation-id
-   │           route is @Public() — one of exactly three
+   │           route is @Public() — one of four business routes (§11.5)
    ▼
 auth-service
    ├─ ValidationPipe: email format, password presence          ← bad input dies here
@@ -815,17 +817,23 @@ remaining TTL, which is why revocation is immediate rather than up-to-15-minutes
 
 - `JwtStrategy` (`passport-jwt`) lives in **`api-gateway` only**.
 - `JwtAuthGuard` is registered as a global `APP_GUARD` at the gateway, so routes are authenticated
-  by default and `@Public()` is required to opt out. **Exactly three routes carry `@Public()`:**
+  by default and `@Public()` is required to opt out. **Four business routes carry `@Public()`:**
 
   | Route | Why it must be anonymous |
   |---|---|
   | `/onboarding/signup` | The brief's stated exception — an organisation must be able to onboard itself |
   | `/auth/login` | You cannot authenticate to authenticate |
+  | `/auth/refresh` | `JwtAuthGuard`/`JwtStrategy` validate an **access** token; refresh exists precisely because the caller's access token has expired, so requiring a valid one to call it would make the flow unusable in the only situation it is ever needed. The refresh token itself — a separate credential, single-use, rotated, theft-detected (below) — is auth-service's own thing to verify, not the gateway's; an attacker with no token at all who calls this route gets exactly what they would at `/auth/login` |
   | `/invitations/:token/accept` | An invitee has no account yet. The **token is the credential** — single-use, hashed at rest, expiring (D-Q7), and it resolves to exactly one invitation in one organisation, so it carries its own tenant scope |
 
   This list is the auditable form of the brief's "no anonymous path beyond the onboarding/signup
-  flow itself" requirement. Accepting an invitation is part of that onboarding flow; a fourth
-  `@Public()` route would need an equally explicit justification here.
+  flow itself" requirement. Accepting an invitation is part of that onboarding flow; a fifth
+  `@Public()` route would need an equally explicit justification here. (Two further paths, `/health`
+  and `/health/ready`, are exempted on separate grounds — §26.4's hardcoded liveness/readiness
+  check, not this decorator — and are excluded from this count.)
+  `/auth/logout` is deliberately **not** in this list: it needs the caller's own verified access
+  token to extract the `jti` it denylists (§16.2) — accepting an unverified request would let any
+  caller revoke any other caller's session by guessing a `jti`.
 - Downstream services use `InternalContextGuard` instead — also a global `APP_GUARD`.
 
 ### 11.6 Argon2 parameters
@@ -2677,13 +2685,14 @@ not silently forgotten.
   `OrganizationSuspended` (already in the event catalogue, §17.3): `auth-service` consumes it and
   disables the affected credentials (§8.2's `credentials.status`), which the login path already
   checks.
-- **Immediate access-token revocation is not yet wired end to end.** §11.4 states logout adds the
-  access token's `jti` to a Redis denylist "so revocation is immediate rather than up-to-15-minutes
-  late." `auth-service`'s `logout()` revokes the refresh token (the part it owns); the access-token
-  denylist write is `api-gateway`'s responsibility (`libs/redis`'s `RedisTokenDenylist` and
-  `JwtStrategy` are already built — §16.2 use #2 — but nothing calls `deny()` yet, since the gateway
-  itself is not built). Close this when `api-gateway`'s logout route is implemented: it must call
-  `RedisTokenDenylist.deny(jti, remainingTtl)` before or alongside forwarding to `auth-service`.
+- ~~**Immediate access-token revocation is not yet wired end to end.**~~ — **RESOLVED.** §11.4 states
+  logout adds the access token's `jti` to a Redis denylist "so revocation is immediate rather than
+  up-to-15-minutes late." `auth-service`'s `logout()` revokes the refresh token (the part it owns);
+  the access-token denylist write was `api-gateway`'s responsibility and nothing called `deny()`
+  until the gateway existed. `api-gateway`'s `AuthController.logout` now calls
+  `TOKEN_DENYLIST.deny(jti, remainingTtl)` — with the jti taken from the caller's OWN
+  signature-verified access token, and the TTL being that token's remaining lifetime — *before*
+  forwarding to `auth-service`, so a failed downstream call still leaves the access token dead.
 - ~~No `subs.subscriptions` row can exist until `subscription-service` is built~~ — **RESOLVED.**
   `subscription-service`'s `assignDefaultPlan` (§8.5) now creates that row during onboarding's
   `SUBSCRIBED` step. `user-service`'s seat-limit transactions, built and tested against the row
@@ -2722,6 +2731,28 @@ not silently forgotten.
   the organisation's effective ceiling is its usage, so every new resource is rejected while no
   existing resource is retroactively invalidated. Close this by having the downgrade path consult
   `resource-service`'s authoritative counter rather than the denormalised copy.
+- **`/auth/refresh`'s public-vs-authenticated status was ambiguous in this document; resolved during
+  `api-gateway`'s implementation as PUBLIC at the gateway.** §11.5's table names exactly **three**
+  `@Public()` routes and does not include `/auth/refresh`, but §8.1's endpoint table lists that
+  route's auth as "public (refresh token)", §9.4's anonymous-context paragraph names `/auth/refresh`
+  among the routes the gateway signs anonymously, and `auth-service`'s own `AuthController`
+  doc comment states `/refresh` is reachable "because the gateway signs an ANONYMOUS context" for
+  it. Those statements cannot all be literally true: the gateway only signs anonymously for a route
+  it treats as unauthenticated. Resolved in favour of the behaviour that makes the system work —
+  `api-gateway`'s `/auth/refresh` carries `@Public()`, making **four** routes public in practice
+  rather than three. The reason is mechanical, not stylistic: `JwtAuthGuard`'s Passport strategy
+  validates an **access** token, and a refresh is by definition the flow a client runs *because* its
+  access token has expired. Requiring one would make refresh unusable in the only situation it is
+  ever called, and the refresh token is properly verified — single-use rotation, theft detection
+  (§11.4) — by `auth-service`, which owns it. §11.5's "no anonymous path beyond the
+  onboarding/signup flow" claim is not weakened: like `/auth/login`, this route asserts no identity,
+  reads no tenant data, and its credential is a token `auth-service` itself minted and stores
+  hashed. `/auth/logout` is deliberately **not** public by the same reasoning read in reverse — it
+  needs the caller's own verified access token to extract the `jti` it denylists (§16.2), and
+  accepting an unverified one would let any caller revoke any other caller's session. Close this by
+  updating §11.5's table to name four routes and state the access-token-vs-refresh-token distinction
+  explicitly, so a future reader does not have to reconstruct it from three partially-conflicting
+  sections.
 **Migration sequencing for `core_db` (§14.2), decided during `user-service`'s implementation.**
 `subs.subscriptions` is created by `user-service`'s own migration — minimally shaped with only the
 columns the §19 seat lock needs (`organization_id`, `used_seats`, `max_seats_snapshot`, and the
@@ -2962,6 +2993,20 @@ later service could reintroduce if the reason it was wrong is forgotten.
   methods use (`id`, `organizationId`), which `TenantBaseEntity` satisfies unchanged, so every
   existing subclass is unaffected. The `organizationId` getter still returns a non-null `string` or
   throws, so no subclass gains the ability to write an unscoped row through the inherited methods.
+- **`InvitationsController.accept()` and `OnboardingController.signup()` carried `@app/tenant-context`'s
+  `Public()` decorator — a real, already-committed defect, found while designing `api-gateway`.**
+  `InternalContextGuard`'s own doc comment states plainly that a downstream service must never
+  declare a route `@Public()` itself (§13.7 row 6) — that decorator exists ONLY for `api-gateway`'s
+  `JwtAuthGuard` (a *different* `Public()`, from `libs/auth`, sharing the same metadata key by
+  design so a route is public for both guards at once — but that equivalence only holds at the
+  gateway, which has `JwtAuthGuard`; a downstream service has `InternalContextGuard` instead, and
+  applying the SAME decorator there skips signature verification entirely). Both routes were
+  reachable with no `x-internal-context` signature check at all — the exact bypass the whole
+  system's isolation-bypass story (§9.4's "exactly one shape everywhere") depends on not existing.
+  Fixed by removing the decorator from both controllers; each route now goes through
+  `InternalContextGuard` like every other route in its service, verifying the ANONYMOUS context
+  `api-gateway` signs for it (§9.4) — the handler still has no caller identity to read, since none
+  exists yet, but the signature (proving the request came through the gateway) is checked.
 
 ---
 
