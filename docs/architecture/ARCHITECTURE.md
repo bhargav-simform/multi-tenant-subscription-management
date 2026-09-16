@@ -1163,13 +1163,25 @@ Four checks, runnable in CI:
 When a lookup by ID returns zero rows, the service cannot locally distinguish "does not exist" from
 "belongs to another tenant" — which is precisely the desired information hiding. Both return `404`.
 
-For detection, `audit-service` consumes `CrossTenantAccessAttempted` events and runs a periodic
-reconciliation against its own record of known IDs. Where an ID is known to exist under a different
-organisation, the event is escalated to `severity: security`. This is the production tenant-leak
-detector the brief asks for: a query over `security_events` grouped by actor.
+The reconciliation that resolves this happens at the **source**, not at `audit-service`, and this is
+a deliberate strengthening over an earlier draft of this section (which described `audit-service`
+itself reconciling against its own record of known IDs after the fact). Instead, the service that
+took the 404 — `resource-service`'s `getById`, `user-service`'s `getById` — runs a NARROW,
+existence-only probe immediately, before publishing anything: a `SECURITY DEFINER` function
+(`resource_exists`, `users.user_exists`; §13.6) that answers exactly one question, "does this id
+exist at all, in any organisation", and returns a single boolean — never the owning organisation,
+never any other column. Only when the id genuinely exists elsewhere is `CrossTenantAccessAttempted`
+published at all; a genuinely nonexistent id publishes nothing. By the time `audit-service` receives
+the event, it is already a confirmed cross-tenant attempt, not a raw "not found" signal needing
+further reconciliation — `audit-service` writes every `CrossTenantAccessAttempted` (and every
+`AuthenticationFailed`) event directly into `security_events` at `severity: security`, no
+reconciliation step of its own required. This is the production tenant-leak detector the brief asks
+for: a query over `security_events` grouped by actor.
 
-The response is always `404`, never `403`. A `403` would confirm the resource exists — an existence
-oracle that leaks precisely the information isolation is meant to protect.
+The probe itself never changes what the CALLER sees: `getById` returns exactly the same `404` either
+way, and the probe is best-effort (wrapped so its own failure can never surface as anything but that
+same `404` — §32.4). The response is always `404`, never `403`. A `403` would confirm the resource
+exists — an existence oracle that leaks precisely the information isolation is meant to protect.
 
 ---
 
@@ -2898,6 +2910,58 @@ later service could reintroduce if the reason it was wrong is forgotten.
   `test/integration/subscription-service/security-definer-bypass.integration.spec.ts`) that exercises
   the actual production function against a real Postgres container and was verified, by temporarily
   reverting the ownership transfer, to fail without the fix.
+- **(2026-09-16, while building `audit-service`) The standard `enableTenantRls()` policy shape
+  REJECTS an insert of a row whose `organization_id` is NULL, from an unscoped transaction** — which
+  would have made every platform-level security event permanently unwritable. `audit_events` and
+  `security_events` are the only tables in the system with a NULLABLE `organization_id` (§8.7), and
+  the null case is real rather than theoretical: auth-service's `publishAuthFailure` emits
+  `AuthenticationFailed` with `organizationId: null` when a login fails for an email that maps to no
+  credential, because there is no organisation to attach — establishing one is precisely what failed.
+  Under the helper's predicate, `organization_id = NULLIF(current_setting('app.current_org', true), '')::uuid`
+  evaluates with NULL on both sides, yielding NULL — and `WITH CHECK` admits only rows for which the
+  expression is TRUE, rejecting NULL exactly as it rejects FALSE. Confirmed against a real Postgres 17
+  container as the real `app_user` role BEFORE the migration was written (`ERROR: new row violates
+  row-level security policy`), not assumed from reading the predicate. The failure mode it would have
+  produced is the quiet kind: every platform-level `AuthenticationFailed` event would throw in the
+  consumer, retry three times and dead-letter, silently disabling the brute-force-detection half of
+  §8.7 while the org-scoped half kept working and the service kept reporting healthy.
+  <br><br>
+  Fixed LOCALLY, in audit-service's own migration for those two tables only, with one added disjunct
+  (`OR (organization_id IS NULL AND NULLIF(current_setting('app.current_org', true), '') IS NULL)`)
+  on both `USING` and `WITH CHECK`. `enableTenantRls()` itself is deliberately unchanged: every other
+  table's `organization_id` is `NOT NULL`, so the disjunct could never fire for them, but widening
+  the single most load-bearing predicate in the architecture to serve two tables that can carry their
+  own policy is not a trade worth making. The same container run confirmed the isolation half is
+  unweakened — an unscoped transaction still cannot plant a row in an organisation, an org-scoped
+  transaction cannot write a platform-level row, and an org-scoped READ sees neither another org's
+  rows nor the platform-level ones.
+  `test/integration/audit-service/rls-and-append-only.integration.spec.ts` re-proves the standard
+  shape's rejection against a throwaway table built with the helper's exact policy, alongside the
+  audit tables accepting the identical insert, so a later "simplification" back to
+  `enableTenantRls()` fails loudly rather than silently breaking platform-level security events.
+- **(2026-09-16) `FORCE ROW LEVEL SECURITY` also defeats the table OWNER's unscoped `DELETE`, which
+  silently no-ops instead of erroring.** Found while writing audit-service's integration suite, whose
+  `beforeEach` cleared both tables as `app_migrator` (necessarily — `app_user` holds no `DELETE` on
+  them at all, by §8.7's append-only grant). Because `FORCE` applies the policy to the owner too, the
+  unscoped `DELETE FROM audit_events` matched only the NULL-org rows and left every tenant's rows in
+  place; rows accumulated across tests until isolation assertions started counting three org-A rows
+  where they expected one. The tests caught it, but the failure presented as an isolation problem
+  rather than a teardown problem, which cost time to read correctly — worth recording because any
+  future suite over a `FORCE`-protected table will hit the identical trap. Fixed by using `TRUNCATE`,
+  which is not row-filtered and so is not subject to the policy. Nothing in production code was
+  affected: no service deletes from an RLS table unscoped. The behaviour is itself reassuring — it is
+  the same mechanism that makes the surrounding assertions meaningful.
+- **(2026-09-16) `TenantRepository`'s generic constraint was `T extends TenantBaseEntity`, which no
+  append-only entity can satisfy.** `audit_events`/`security_events` are genuinely tenant-owned —
+  `organization_id`, `TENANT_TABLES`, `ENABLE` + `FORCE` RLS, the lot — but carry no
+  `updated_at`/`deleted_at` (an audit row is never updated and never soft-deleted; the database GRANT
+  forbids both) and have a nullable `organization_id`. The constraint would have forced their
+  repositories to either fake those columns or skip `TenantRepository` entirely, putting the one pair
+  of repositories with an unusual shape OUTSIDE the defence-in-depth layer — exactly backwards.
+  Widened to a new `TenantScopedEntity` interface declaring only what the class's own two concrete
+  methods use (`id`, `organizationId`), which `TenantBaseEntity` satisfies unchanged, so every
+  existing subclass is unaffected. The `organizationId` getter still returns a non-null `string` or
+  throws, so no subclass gains the ability to write an unscoped row through the inherited methods.
 
 ---
 

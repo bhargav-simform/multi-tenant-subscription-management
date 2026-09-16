@@ -1,6 +1,5 @@
 import { EntityManager, EntityTarget, FindOptionsWhere } from 'typeorm';
 import { TenantContextStore } from '@app/tenant-context';
-import { TenantBaseEntity } from '../entities/tenant-base.entity';
 
 /**
  * Defence-in-depth wrapper over TypeORM's Repository (§13.5 "second mechanism").
@@ -24,7 +23,35 @@ import { TenantBaseEntity } from '../entities/tenant-base.entity';
  * set and RLS filters the result regardless of whether this class's own
  * predicate is correct.
  */
-export abstract class TenantRepository<T extends TenantBaseEntity> {
+/**
+ * The minimum shape this class's own two concrete methods need: an `id` to
+ * look up by and an `organization_id` to scope by. `TenantBaseEntity` satisfies
+ * it — every existing subclass is unaffected — but it is deliberately NOT the
+ * constraint itself, because not every tenant table's entity is shaped like
+ * `TenantBaseEntity`.
+ *
+ * The concrete case that forced this widening (§32.4): audit-service's
+ * `audit_events`/`security_events` are genuinely tenant-owned — `organization_id`,
+ * `TENANT_TABLES`, ENABLE + FORCE RLS, the lot — but they are APPEND-ONLY, so
+ * they carry no `updated_at`/`deleted_at`, and their `organization_id` is
+ * NULLABLE because a platform-level security event (a failed login before any
+ * org context exists) has no organisation. Neither difference weakens
+ * isolation; both make `TenantBaseEntity` the wrong column set. The alternative
+ * — letting those repositories skip `TenantRepository` entirely — would have put
+ * the one pair of repositories with an unusual shape OUTSIDE the
+ * defence-in-depth layer, which is exactly backwards.
+ *
+ * Note `organizationId` is `string | null` here, not `string`: a narrower
+ * declaration would make the nullable-column case unassignable. The `organizationId`
+ * GETTER below still returns a non-null `string` or throws, so no subclass gains
+ * the ability to write an unscoped row through the inherited methods.
+ */
+export interface TenantScopedEntity {
+  id: string;
+  organizationId: string | null;
+}
+
+export abstract class TenantRepository<T extends TenantScopedEntity> {
   protected abstract readonly entityTarget: EntityTarget<T>;
 
   constructor(protected readonly tenantContext: TenantContextStore) {}

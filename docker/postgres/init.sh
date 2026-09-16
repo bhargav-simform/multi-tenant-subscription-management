@@ -94,11 +94,21 @@ grant_standard_schema auth_db
 grant_standard_schema tenant_db
 grant_standard_schema resource_db
 
-# audit_db: append-only. app_user gets SELECT + INSERT but never UPDATE/DELETE —
-# no code path in audit-service is granted the ability to rewrite history.
+# audit_db: append-only (§8.7). app_user gets SELECT + INSERT but NEVER
+# UPDATE/DELETE — no code path in audit-service is granted the ability to
+# rewrite history. Deliberately its own grant block, not
+# grant_standard_schema(), because that helper's ALTER DEFAULT PRIVILEGES
+# grants UPDATE+DELETE too, which this database must never have.
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname audit_db <<-EOSQL
   GRANT ALL ON SCHEMA public TO app_migrator;
   GRANT USAGE ON SCHEMA public TO app_user;
+  -- §13.6, §32.4: audit_events/security_events are RLS-protected with a
+  -- nullable organization_id (a platform-level security event, e.g. a failed
+  -- login before any org context exists, has none) — audit-service's own
+  -- migration defines a policy variant for this, but app_rls_bypass still
+  -- needs schema access here for the same reason as every other database, in
+  -- case a future narrow lookup function is added in this schema.
+  GRANT ALL ON SCHEMA public TO app_rls_bypass;
   ALTER DEFAULT PRIVILEGES FOR ROLE app_migrator IN SCHEMA public
     GRANT SELECT, INSERT ON TABLES TO app_user;
   ALTER DEFAULT PRIVILEGES FOR ROLE app_migrator IN SCHEMA public
