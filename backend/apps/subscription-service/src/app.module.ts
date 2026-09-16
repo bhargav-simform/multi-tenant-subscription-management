@@ -11,7 +11,7 @@ import {
 import { AuthorizationModule, CaslAbilityGuard } from '@app/authorization';
 import { DatabaseModule } from '@app/database';
 import { RedisModule } from '@app/redis';
-import { KAFKA_CLIENT, KafkaModule } from '@app/kafka';
+import { KafkaModule } from '@app/kafka';
 import { buildPinoConfig } from '@app/logging';
 import { Plan } from './plans/plan.entity';
 import { Subscription } from './subscriptions/subscription.entity';
@@ -56,7 +56,15 @@ import { HealthController } from './health.controller';
     AuthorizationModule,
     DatabaseModule,
     RedisModule,
-    KafkaModule,
+    KafkaModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        brokers: config.getOrThrow<string>('KAFKA_BROKERS').split(','),
+        clientIdPrefix: config.get<string>('KAFKA_CLIENT_ID_PREFIX', 'mtsm'),
+        serviceName: 'subscription-service',
+        groupId: 'subscription-service-group',
+      }),
+    }),
     PlansModule,
     SubscriptionsModule,
     UsageModule,
@@ -66,16 +74,6 @@ import { HealthController } from './health.controller';
   providers: [
     { provide: APP_GUARD, useClass: InternalContextGuard },
     { provide: APP_GUARD, useClass: CaslAbilityGuard },
-    {
-      provide: KAFKA_CLIENT,
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
-        brokers: config.getOrThrow<string>('KAFKA_BROKERS').split(','),
-        clientIdPrefix: config.get<string>('KAFKA_CLIENT_ID_PREFIX', 'mtsm'),
-        serviceName: 'subscription-service',
-        groupId: 'subscription-service-group',
-      }),
-    },
   ],
 })
 export class AppModule implements NestModule {

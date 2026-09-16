@@ -1,0 +1,363 @@
+# docs/architecture/ARCHITECTURE.md §27. `docker compose up` with a filled-in
+# .env is the whole setup procedure — no manual migration step, no seeding step.
+#
+# §27.1 says eleven containers and two published ports. This file has TEN and
+# ONE: `frontend` is not here yet (it is a bare Vite scaffold, not a built
+# application), so its container and its 5173 → host mapping are deliberately
+# absent and will be added when it exists.
+#
+# §10.5 layer 1, expressed as configuration rather than prose: EXACTLY ONE
+# `ports:` mapping appears in this entire file, on api-gateway. postgres, redis,
+# kafka and the six non-gateway services are reachable only on the internal
+# bridge network. That is a property you can grep for.
+#
+# §27.4 exclusions honoured: no Kubernetes, no service mesh, no
+# Prometheus/Grafana, no Elasticsearch, no RabbitMQ, no ZooKeeper (Kafka runs in
+# KRaft mode), no nginx.
+
+name: mtsm
+
+# ── Shared fragments ──────────────────────────────────────────────────────
+#
+# Every service reads the SAME .env (§22). Nest's ConfigService picks out only
+# the vars each service actually asks for via getOrThrow/get, and silently
+# ignores the rest, so one shared file is correct and matches .env.example's
+# single-file shape. PORT is the one value that cannot be shared — seven
+# services cannot agree on one — so it is set per-service in `environment:`,
+# matching the *_SERVICE_URL values in .env.example.
+x-backend-service: &backend-service
+  restart: unless-stopped
+  env_file: .env
+  networks: [internal]
+
+# Healthcheck shape shared by the six services that have a database. Their
+# /health/ready probes the DataSource with `SELECT 1`, so "healthy" here means
+# "Postgres reachable AND assertRlsSafeRole passed at boot" — a service that
+# failed that check never reaches listen() at all.
+#
+# start_period 40s is chosen for cold starts on a laptop: Nest boot plus a
+# TypeORM connection is typically 3-5s, but the FIRST container after an image
+# build competes with six siblings for CPU. Failures during start_period do not
+# count toward retries, so a generous value costs nothing when things are fast.
+x-service-healthcheck: &service-healthcheck
+  interval: 10s
+  timeout: 5s
+  retries: 5
+  start_period: 40s
+
+services:
+  # ── Infrastructure ──────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      # The official image's own required vars. POSTGRES_USER must match what
+      # init.sh passes to `psql --username "$POSTGRES_USER"`.
+      POSTGRES_USER: ${POSTGRES_SUPERUSER}
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD}
+      # init.sh's own required vars — it asserts both with `: "${VAR:?...}"`
+      # and creates the app_user/app_migrator roles with them.
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+      MIGRATOR_DB_PASSWORD: ${MIGRATOR_DB_PASSWORD}
+    volumes:
+      # §27.2: the official image runs anything in this directory ONCE, on
+      # first boot, when the data directory is empty. Mounted read-only — the
+      # container has no business modifying it. Note that this means editing
+      # init.sh does NOT re-run it: `docker compose down -v` (destroying the
+      # named volume below) is what forces a re-initialisation.
+      - ./docker/postgres/init.sh:/docker-entrypoint-initdb.d/init.sh:ro
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # -U/-d matter: bare `pg_isready` reports ready as soon as the server
+      # accepts connections, which on a first boot happens BEFORE init.sh has
+      # run. Probing a database init.sh creates makes the check mean what
+      # depends_on needs it to mean.
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_SUPERUSER} -d ${TENANT_DB_NAME}']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    networks: [internal]
+    # NO `ports:` — §10.5 layer 1.
+
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks: [internal]
+    # NO `ports:`.
+
+  kafka:
+    # §17 / §27.1: KRaft mode — one process that is both broker and controller,
+    # no ZooKeeper (§27.4 excludes it explicitly).
+    #
+    # NOTE ON THE REPOSITORY NAME, which is not what §27.1 writes: Broadcom
+    # retired the public `bitnami/*` Docker Hub catalogue, and `bitnami/kafka`
+    # now returns `manifest unknown` for EVERY tag — including `latest`
+    # (verified: the tags API returns an empty list for that repository).
+    # `bitnamilegacy/kafka` is Bitnami's own published home for the retired
+    # images and is byte-identical to what `bitnami/kafka` used to serve, so
+    # every KAFKA_CFG_* variable below is the same well-known interface §27.1
+    # intends. Pinned to an exact tag rather than a floating one precisely
+    # because this is an archived repository that will not receive updates.
+    image: bitnamilegacy/kafka:4.0.0-debian-12-r10
+    restart: unless-stopped
+    environment:
+      # KRaft requires a node id, a controller quorum naming THIS node, and the
+      # controller listener to be declared in both the listener map and
+      # KAFKA_CFG_CONTROLLER_LISTENER_NAMES. Omitting any one of them makes the
+      # broker exit at startup rather than degrade.
+      KAFKA_CFG_NODE_ID: '0'
+      KAFKA_CFG_PROCESS_ROLES: controller,broker
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 0@kafka:9093
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      # ADVERTISED_LISTENERS is what clients are told to reconnect to after the
+      # initial metadata fetch. It must be the compose service name, not
+      # localhost — .env.example's KAFKA_BROKERS=kafka:9092 is the other half
+      # of this pair and the two must agree.
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # Single broker: the defaults of 3 would make every internal topic
+      # (notably __consumer_offsets) fail to elect a leader, and consumers would
+      # hang forever rather than error.
+      KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR: '1'
+      KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: '1'
+      KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR: '1'
+      KAFKA_CFG_DEFAULT_REPLICATION_FACTOR: '1'
+      # Services create their topics on first publish/subscribe rather than a
+      # provisioning step; §17 does not define an explicit topic-creation stage.
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      ALLOW_PLAINTEXT_LISTENER: 'yes'
+    volumes:
+      - kafka-data:/bitnami/kafka
+    healthcheck:
+      # The bitnami image ships Kafka's own CLI tools. A successful
+      # --list against the broker's own advertised listener proves the
+      # controller quorum elected a leader and the broker is serving metadata —
+      # strictly more than a TCP port check, which passes while KRaft is still
+      # forming its quorum.
+      test: ['CMD-SHELL', 'kafka-topics.sh --bootstrap-server kafka:9092 --list || exit 1']
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
+    networks: [internal]
+    # NO `ports:`.
+
+  # ── One-shot migrator (§27.3) ───────────────────────────────────────────
+
+  migrator:
+    build:
+      # Context is the REPO ROOT, not backend/, because this image needs both
+      # backend/ (the migrations) and docker/migrator/run-migrations.sh. A
+      # build context cannot reach above itself.
+      context: .
+      dockerfile: backend/Dockerfile.migrator
+    # `no`, not the default: this container is SUPPOSED to exit 0. Any restart
+    # policy would make Compose treat its successful exit as a crash and run
+    # every migration again in a loop.
+    restart: 'no'
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [internal]
+
+  # ── Backend services ────────────────────────────────────────────────────
+  #
+  # Each depends on migrator completing SUCCESSFULLY (not merely exiting), which
+  # is what removes the manual migration step the brief forbids. They also wait
+  # on redis/kafka being healthy: a service whose Kafka consumer cannot reach a
+  # broker at boot retries, but starting it before the broker exists just fills
+  # the logs with errors during the one minute a first `up` takes.
+
+  tenant-service:
+    <<: *backend-service
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        SERVICE: tenant-service
+    environment:
+      PORT: '3001'
+    healthcheck:
+      <<: *service-healthcheck
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:3001/health/ready']
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  auth-service:
+    <<: *backend-service
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        SERVICE: auth-service
+    environment:
+      PORT: '3002'
+    healthcheck:
+      <<: *service-healthcheck
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:3002/health/ready']
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  user-service:
+    <<: *backend-service
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        SERVICE: user-service
+    environment:
+      PORT: '3003'
+    healthcheck:
+      <<: *service-healthcheck
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:3003/health/ready']
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  subscription-service:
+    <<: *backend-service
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        SERVICE: subscription-service
+    environment:
+      PORT: '3004'
+    healthcheck:
+      <<: *service-healthcheck
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:3004/health/ready']
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  resource-service:
+    <<: *backend-service
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        SERVICE: resource-service
+    environment:
+      PORT: '3005'
+    healthcheck:
+      <<: *service-healthcheck
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:3005/health/ready']
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  audit-service:
+    <<: *backend-service
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        SERVICE: audit-service
+    environment:
+      PORT: '3006'
+    healthcheck:
+      <<: *service-healthcheck
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:3006/health/ready']
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  api-gateway:
+    <<: *backend-service
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        SERVICE: api-gateway
+    environment:
+      PORT: '3000'
+    ports:
+      # THE ONLY PUBLISHED PORT IN THIS FILE (§27.1, §10.5 layer 1). Bound to
+      # 127.0.0.1 rather than 0.0.0.0 so a laptop on a café network does not
+      # expose the whole stack to that network — `docker compose up` for local
+      # development should not be a listening service on every interface.
+      - '127.0.0.1:3000:3000'
+    healthcheck:
+      <<: *service-healthcheck
+      # NOTE THE /api/v1 PREFIX, which the six downstream healthchecks above do
+      # NOT have. main.ts calls app.setGlobalPrefix('api/v1') in THIS service
+      # only (§8.1: "the entire public API surface lives under one versioned
+      # prefix") — the downstream services are not public and set no prefix.
+      # Verified: /health/ready 404s here while /api/v1/health/ready returns
+      # {"status":"ok","redis":true}.
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:3000/api/v1/health/ready']
+    depends_on:
+      # NO Postgres dependency and NO migrator dependency: §10.3, this service
+      # has no database, no TypeOrmModule, and no assertRlsSafeRole boot check,
+      # so there is nothing for a schema to race.
+      #
+      # Redis IS a hard dependency: RedisTokenDenylist fails CLOSED (§16.4), so
+      # with Redis unreachable every authenticated request 401s and
+      # /health/ready reports `degraded` — the gateway's readiness probe checks
+      # exactly this.
+      redis:
+        condition: service_healthy
+      # The six downstream services are listed as plain `service_started`, not
+      # `service_healthy`. The gateway reaches them over HttpModule (axios) per
+      # request, never at boot, so a downstream that is still starting costs a
+      # connection-refused on an early request and nothing more. Waiting for all
+      # six to be HEALTHY would serialise the whole stack's startup behind the
+      # slowest one for no correctness gain; listing them at all is purely so
+      # `docker compose up api-gateway` brings up something useful.
+      auth-service:
+        condition: service_started
+      tenant-service:
+        condition: service_started
+      user-service:
+        condition: service_started
+      subscription-service:
+        condition: service_started
+      resource-service:
+        condition: service_started
+      audit-service:
+        condition: service_started
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  kafka-data:

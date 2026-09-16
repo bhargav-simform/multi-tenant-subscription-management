@@ -7,7 +7,7 @@ import { TenantContextModule, TenantContextMiddleware, InternalContextGuard } fr
 import { AuthorizationModule, CaslAbilityGuard } from '@app/authorization';
 import { DatabaseModule } from '@app/database';
 import { RedisModule } from '@app/redis';
-import { KAFKA_CLIENT, KafkaModule } from '@app/kafka';
+import { KafkaModule } from '@app/kafka';
 import { OrganizationsModule } from './organizations/organizations.module';
 import { OnboardingModule } from './onboarding/onboarding.module';
 import { buildPinoConfig } from '@app/logging';
@@ -48,16 +48,7 @@ import { HealthController } from './health.controller';
     AuthorizationModule,
     DatabaseModule,
     RedisModule,
-    KafkaModule,
-    OrganizationsModule,
-    OnboardingModule,
-  ],
-  controllers: [HealthController],
-  providers: [
-    { provide: APP_GUARD, useClass: InternalContextGuard },
-    { provide: APP_GUARD, useClass: CaslAbilityGuard },
-    {
-      provide: KAFKA_CLIENT,
+    KafkaModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
         brokers: config.getOrThrow<string>('KAFKA_BROKERS').split(','),
@@ -65,7 +56,14 @@ import { HealthController } from './health.controller';
         serviceName: 'tenant-service',
         groupId: 'tenant-service-group',
       }),
-    },
+    }),
+    OrganizationsModule,
+    OnboardingModule,
+  ],
+  controllers: [HealthController],
+  providers: [
+    { provide: APP_GUARD, useClass: InternalContextGuard },
+    { provide: APP_GUARD, useClass: CaslAbilityGuard },
   ],
 })
 export class AppModule implements NestModule {

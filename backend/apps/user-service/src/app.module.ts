@@ -12,7 +12,7 @@ import {
 import { AuthorizationModule, CaslAbilityGuard } from '@app/authorization';
 import { DatabaseModule } from '@app/database';
 import { RedisModule } from '@app/redis';
-import { KAFKA_CLIENT, KafkaModule } from '@app/kafka';
+import { KafkaModule } from '@app/kafka';
 import { buildPinoConfig } from '@app/logging';
 import { User } from './users/user.entity';
 import { Invitation } from './invitations/invitation.entity';
@@ -65,7 +65,15 @@ import { HealthController } from './health.controller';
     AuthorizationModule,
     DatabaseModule,
     RedisModule,
-    KafkaModule,
+    KafkaModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        brokers: config.getOrThrow<string>('KAFKA_BROKERS').split(','),
+        clientIdPrefix: config.get<string>('KAFKA_CLIENT_ID_PREFIX', 'mtsm'),
+        serviceName: 'user-service',
+        groupId: 'user-service-group',
+      }),
+    }),
     UsersModule,
     InvitationsModule,
     SubscriptionsModule,
@@ -76,16 +84,6 @@ import { HealthController } from './health.controller';
     { provide: APP_GUARD, useClass: InternalContextGuard },
     { provide: APP_GUARD, useClass: CaslAbilityGuard },
     InvitationExpirySweepService,
-    {
-      provide: KAFKA_CLIENT,
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
-        brokers: config.getOrThrow<string>('KAFKA_BROKERS').split(','),
-        clientIdPrefix: config.get<string>('KAFKA_CLIENT_ID_PREFIX', 'mtsm'),
-        serviceName: 'user-service',
-        groupId: 'user-service-group',
-      }),
-    },
   ],
 })
 export class AppModule implements NestModule {

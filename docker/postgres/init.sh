@@ -70,6 +70,39 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" <<-EOSQL
   GRANT app_rls_bypass TO app_migrator;
 EOSQL
 
+# ── CREATE ON DATABASE for app_migrator (all five databases) ──────────────
+#
+# BUG FIX (found empirically while wiring the one-shot migrator container):
+# without this, auth-service's and user-service's very first migration abort
+# with `permission denied to create extension "citext"`, and NO schema is ever
+# created. Both call `CREATE EXTENSION IF NOT EXISTS citext` (auth-service also
+# pgcrypto) for their case-insensitive email columns.
+#
+# citext and pgcrypto are both `trusted` extensions in PostgreSQL 17 (verified:
+# pg_available_extensions.trusted = t for both), which means a NON-superuser
+# may install them — but only if that role holds CREATE on the database. These
+# databases are owned by `postgres` (CREATE DATABASE above runs as the
+# superuser), so app_migrator inherited no database-level CREATE at all. Every
+# grant below this point is SCHEMA-level (GRANT ALL ON SCHEMA public), which is
+# a different privilege and does not cover CREATE EXTENSION.
+#
+# This is the narrowest fix: CREATE on the database lets app_migrator install a
+# trusted extension and create schemas — both things its migrations already do
+# — and nothing more. It does not touch app_user, which remains DML-only,
+# NOSUPERUSER and NOBYPASSRLS; §13.8's startup check is unaffected.
+grant_database_create() {
+  local db="$1"
+  psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" <<-EOSQL
+    GRANT CREATE ON DATABASE "${db}" TO app_migrator;
+EOSQL
+}
+
+grant_database_create auth_db
+grant_database_create tenant_db
+grant_database_create core_db
+grant_database_create resource_db
+grant_database_create audit_db
+
 grant_standard_schema() {
   local db="$1"
   psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$db" <<-EOSQL

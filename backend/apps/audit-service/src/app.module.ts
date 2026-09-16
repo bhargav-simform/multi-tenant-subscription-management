@@ -11,7 +11,7 @@ import {
 import { AuthorizationModule, CaslAbilityGuard } from '@app/authorization';
 import { DatabaseModule } from '@app/database';
 import { RedisModule } from '@app/redis';
-import { KAFKA_CLIENT, KafkaModule } from '@app/kafka';
+import { KafkaModule } from '@app/kafka';
 import { buildPinoConfig } from '@app/logging';
 import { AuditEvent } from './audit/audit-event.entity';
 import { SecurityEvent } from './audit/security-event.entity';
@@ -55,16 +55,7 @@ import { HealthController } from './health.controller';
     AuthorizationModule,
     DatabaseModule,
     RedisModule,
-    KafkaModule,
-    AuditModule,
-    EventsModule,
-  ],
-  controllers: [HealthController],
-  providers: [
-    { provide: APP_GUARD, useClass: InternalContextGuard },
-    { provide: APP_GUARD, useClass: CaslAbilityGuard },
-    {
-      provide: KAFKA_CLIENT,
+    KafkaModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
         brokers: config.getOrThrow<string>('KAFKA_BROKERS').split(','),
@@ -77,7 +68,14 @@ import { HealthController } from './health.controller';
         // shared `consumed_events` table correct.
         groupId: 'audit-service-group',
       }),
-    },
+    }),
+    AuditModule,
+    EventsModule,
+  ],
+  controllers: [HealthController],
+  providers: [
+    { provide: APP_GUARD, useClass: InternalContextGuard },
+    { provide: APP_GUARD, useClass: CaslAbilityGuard },
   ],
 })
 export class AppModule implements NestModule {

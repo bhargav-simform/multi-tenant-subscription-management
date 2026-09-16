@@ -1,5 +1,10 @@
 {
   "name": "user-service",
   "private": true,
-  "version": "0.0.0"
+  "version": "0.0.0",
+  "scripts": {
+    "migration:run": "TS_NODE_PROJECT=../../tsconfig.json node -r ../../node_modules/tsconfig-paths/register ../../node_modules/typeorm/cli-ts-node-commonjs.js migration:run -d src/database/data-source.ts",
+    "migration:revert": "TS_NODE_PROJECT=../../tsconfig.json node -r ../../node_modules/tsconfig-paths/register ../../node_modules/typeorm/cli-ts-node-commonjs.js migration:revert -d src/database/data-source.ts",
+    "migration:show": "TS_NODE_PROJECT=../../tsconfig.json node -r ../../node_modules/tsconfig-paths/register ../../node_modules/typeorm/cli-ts-node-commonjs.js migration:show -d src/database/data-source.ts"
+  }
 }
