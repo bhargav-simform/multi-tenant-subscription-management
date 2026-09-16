@@ -10,22 +10,23 @@
  * itself (an automated test asserting every table in the database appears in
  * exactly one list, and every table listed here actually exists) has not been
  * written yet. Until it exists, `TENANT_TABLES` below includes entries for
- * tables owned by services not yet built (subscription-service,
- * resource-service, audit-service) — this file doubles as the forward
- * declaration those services' migrations must match, not (yet) an enforced
- * invariant. Writing the actual CI check is tracked as future work; do not
- * assume its absence means classification is optional.
+ * tables owned by services not yet built (audit-service) — this file doubles
+ * as the forward declaration those services' migrations must match, not (yet)
+ * an enforced invariant. Writing the actual CI check is tracked as future
+ * work; do not assume its absence means classification is optional.
  */
 /**
  * `consumed_events` (§17.6) is created ONCE PER CONSUMING SERVICE, in that
- * service's own schema — now TWO physical instances exist
+ * service's own schema — now THREE physical instances exist
  * (`users.consumed_events` for user-service, `subs.consumed_events` for
- * subscription-service; see each service's own migration). A bare,
- * unqualified name here cannot distinguish them. Harmless today because
- * nothing automated reads this list yet (see the file header above); the
- * §13.8 check, once written, MUST classify by schema-qualified name, not
- * bare name, or it cannot correctly report which physical table a finding
- * refers to.
+ * subscription-service, and a bare `consumed_events` in resource_db's default
+ * `public` schema for resource-service; see each service's own migration). A
+ * bare, unqualified name here cannot distinguish them — and note the three
+ * are not even in one database, so a schema-qualified name alone is not
+ * sufficient either. Harmless today because nothing automated reads this list
+ * yet (see the file header above); the §13.8 check, once written, MUST
+ * classify by (database, schema, table), not bare name, or it cannot
+ * correctly report which physical table a finding refers to.
  */
 export const GLOBAL_TABLES = ['plans', 'consumed_events'] as const;
 
@@ -62,6 +63,21 @@ export const TENANT_TABLES = [
   'invitations',
   'subscriptions',
   'subscription_history',
+  /**
+   * §8.6, resource_db (`public` schema). Both created AND RLS-protected in
+   * resource-service's single CreateResourcesAndPlanLimitCache migration.
+   *
+   * `plan_limit_cache` is worth a note: it is the one tenant table here whose
+   * `organization_id` is its PRIMARY KEY rather than an ordinary column (it is
+   * a read model keyed by org, one row per organisation, so it does not extend
+   * TenantBaseEntity and has no separate `id`). It is tenant-owned all the
+   * same — it carries an organisation's storage ceiling and its authoritative
+   * `used_storage_bytes` counter — so it gets the identical ENABLE + FORCE RLS
+   * treatment. It is deliberately NOT in REGISTRY_TABLES: neither of that
+   * list's two documented justifications applies (it is not the tenant
+   * registry, and it is not a service-local lookup table outside RLS's reach),
+   * and "it has no id column" is not a justification.
+   */
   'resources',
   'plan_limit_cache',
   'audit_events',
