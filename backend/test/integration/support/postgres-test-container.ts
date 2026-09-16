@@ -45,7 +45,16 @@ export class PostgresTestContainer {
       await admin.query(
         `CREATE ROLE app_user WITH LOGIN PASSWORD '${APP_PASSWORD}' NOSUPERUSER NOBYPASSRLS`,
       );
+      // §13.6, §32.4: mirrors init.sh's app_rls_bypass — NOLOGIN, BYPASSRLS,
+      // owns nothing but the narrow SECURITY DEFINER lookup functions a
+      // migration transfers to it. Needed here because FORCE ROW LEVEL
+      // SECURITY applies its policy even inside a SECURITY DEFINER function
+      // owned by a NOBYPASSRLS role — a real bug this container's tests
+      // exist to catch, not just app_migrator's own convenience.
+      await admin.query(`CREATE ROLE app_rls_bypass WITH NOLOGIN NOSUPERUSER BYPASSRLS`);
+      await admin.query(`GRANT app_rls_bypass TO app_migrator`);
       await admin.query(`GRANT ALL ON SCHEMA public TO app_migrator`);
+      await admin.query(`GRANT ALL ON SCHEMA public TO app_rls_bypass`);
       await admin.query(`GRANT USAGE ON SCHEMA public TO app_user`);
       await admin.query(`ALTER DATABASE test_db OWNER TO app_migrator`);
     } finally {
@@ -100,6 +109,11 @@ export class PostgresTestContainer {
     await queryRunner.connect();
     try {
       await queryRunner.query(`GRANT USAGE ON SCHEMA "${schema}" TO app_user`);
+      // §13.6, §32.4: mirrors init.sh's per-schema app_rls_bypass grant —
+      // ALTER FUNCTION ... OWNER TO requires the target role to have
+      // privileges on the schema a function lives in, for any custom schema
+      // a migration creates (users, subs, ...), not just public.
+      await queryRunner.query(`GRANT ALL ON SCHEMA "${schema}" TO app_rls_bypass`);
       await queryRunner.query(
         `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "${schema}" TO app_user`,
       );

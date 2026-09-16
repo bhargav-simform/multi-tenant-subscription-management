@@ -27,6 +27,21 @@ function qualifyIdentifier(table: string): string {
  * policy. WITH CHECK is not optional: without it, a write can plant a row in
  * another tenant.
  *
+ * `NULLIF(current_setting(...), '')` is not optional either (§32.4): PostgreSQL's
+ * `set_config(name, value, true)` — the transaction-LOCAL scoping
+ * TenantAwareDataSource issues every request — reverts the setting to the EMPTY
+ * STRING on commit, never back to NULL, and that empty string persists for the
+ * rest of that session. A later query on a REUSED pooled connection that hasn't
+ * re-scoped (runGlobal(), the pre-scope phase of transactionWithDeferredScope,
+ * the platform-admin "leave it unset" path) then evaluates `''::uuid`, which
+ * RAISES instead of returning zero rows — confirmed empirically against a real
+ * Postgres container, and a live bug in production (pool reuse makes "a
+ * connection that has never run a scoped transaction" the rare case, not the
+ * common one). `NULLIF(..., '')` turns that empty string back into a genuine SQL
+ * NULL before the cast, restoring the documented "no scope set -> zero rows"
+ * behaviour exactly, confirmed against a real Postgres container to give
+ * identical isolation with no error on a reused connection.
+ *
  * `table` may be bare ("resources") or schema-qualified ("users.users" — §14.2's
  * per-service schemas inside the shared core_db).
  */
@@ -36,8 +51,8 @@ export async function enableTenantRls(queryRunner: QueryRunner, table: string): 
   await queryRunner.query(`ALTER TABLE ${qualified} FORCE ROW LEVEL SECURITY`);
   await queryRunner.query(`
     CREATE POLICY tenant_isolation ON ${qualified}
-      USING      (organization_id = current_setting('app.current_org', true)::uuid)
-      WITH CHECK (organization_id = current_setting('app.current_org', true)::uuid)
+      USING      (organization_id = NULLIF(current_setting('app.current_org', true), '')::uuid)
+      WITH CHECK (organization_id = NULLIF(current_setting('app.current_org', true), '')::uuid)
   `);
 }
 

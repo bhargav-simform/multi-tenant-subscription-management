@@ -25,6 +25,49 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" <<-EOSQL
   -- every service boot, and what makes RLS structurally unbypassable by
   -- application code (§13.5, §13.6).
   CREATE ROLE app_user WITH LOGIN PASSWORD '${APP_DB_PASSWORD}' NOSUPERUSER NOBYPASSRLS;
+
+  -- app_rls_bypass (§13.6, §32.4): NOLOGIN — nothing ever connects AS this
+  -- role, and no application code, credential, or connection string
+  -- references it. It exists SOLELY to be the OWNER of a small, named set of
+  -- narrow SECURITY DEFINER lookup functions (one row, one boolean or one id
+  -- column, never general content) on FORCE-protected tables.
+  --
+  -- This is not a stylistic choice. FORCE ROW LEVEL SECURITY applies its
+  -- policy to the table owner too — that is the entire point of FORCE — and
+  -- Postgres extends that to a SECURITY DEFINER function's effective owner:
+  -- a function owned by app_migrator (or any NOBYPASSRLS role) still has the
+  -- policy applied inside it, silently returning nothing instead of
+  -- bypassing RLS (confirmed empirically; Postgres's own error message when
+  -- attempting to work around this points at exactly one fix: give the
+  -- owner BYPASSRLS). Without this role, EVERY narrow cross-tenant lookup
+  -- function in this codebase (users.get_user_organization_id,
+  -- subs.get_usage_aggregates, resource_exists, users.user_exists) silently
+  -- returns nothing instead of the one row/column it is meant to expose —
+  -- this is what broke auth-service's login role lookup in production
+  -- before this fix (§32.4).
+  --
+  -- BYPASSRLS on this role is safe DESPITE the name: it is never a login
+  -- role, so no CREDENTIAL can ever connect as it directly. It does not
+  -- weaken app_user's own guarantee — app_user stays NOBYPASSRLS everywhere,
+  -- unchanged, and §13.8's startup check verifies THAT role, not this one.
+  --
+  -- CORRECTION to an earlier draft of this comment: this role's capability
+  -- is not limited to "being the owner of specific functions" in practice —
+  -- app_migrator is GRANTed membership in it below (required for
+  -- ALTER FUNCTION ... OWNER TO to succeed at all: Postgres requires the
+  -- current user to be a MEMBER of the target role, not merely to hold
+  -- schema privileges — confirmed empirically; without this grant every
+  -- migration that transfers a function's ownership aborts with
+  -- "must be able to SET ROLE"). That membership means app_migrator itself
+  -- COULD `SET ROLE app_rls_bypass` and read across every tenant. This is
+  -- accepted: app_migrator is a one-shot, DDL-only credential used solely by
+  -- the migrator container, never a runtime credential a running service
+  -- holds, and it already has unrestricted DDL over every table it owns.
+  -- app_user — the credential every running service actually connects as —
+  -- has NO membership in app_rls_bypass and cannot SET ROLE to it; that is
+  -- the guarantee that actually matters, and it is unaffected.
+  CREATE ROLE app_rls_bypass WITH NOLOGIN NOSUPERUSER BYPASSRLS;
+  GRANT app_rls_bypass TO app_migrator;
 EOSQL
 
 grant_standard_schema() {
@@ -32,6 +75,13 @@ grant_standard_schema() {
   psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$db" <<-EOSQL
     GRANT ALL ON SCHEMA public TO app_migrator;
     GRANT USAGE ON SCHEMA public TO app_user;
+    -- §13.6, §32.4: app_rls_bypass needs USAGE/CREATE on the schema so
+    -- app_migrator can transfer ownership of a narrow lookup function to it
+    -- (ALTER FUNCTION ... OWNER TO requires the target role to have
+    -- privileges on the containing schema) — a per-database grant, since
+    -- schema privileges do not span databases even though the role itself
+    -- is cluster-wide.
+    GRANT ALL ON SCHEMA public TO app_rls_bypass;
     ALTER DEFAULT PRIVILEGES FOR ROLE app_migrator IN SCHEMA public
       GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_user;
     ALTER DEFAULT PRIVILEGES FOR ROLE app_migrator IN SCHEMA public
@@ -69,6 +119,11 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname core_db <<-EOSQL
   CREATE SCHEMA IF NOT EXISTS subs  AUTHORIZATION app_migrator;
   GRANT USAGE ON SCHEMA users TO app_user;
   GRANT USAGE ON SCHEMA subs  TO app_user;
+  -- §13.6, §32.4: same reasoning as grant_standard_schema — needed so
+  -- ownership of users.get_user_organization_id/user_exists and
+  -- subs.get_usage_aggregates can be transferred to app_rls_bypass.
+  GRANT ALL ON SCHEMA users TO app_rls_bypass;
+  GRANT ALL ON SCHEMA subs  TO app_rls_bypass;
   ALTER DEFAULT PRIVILEGES FOR ROLE app_migrator IN SCHEMA users
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_user;
   ALTER DEFAULT PRIVILEGES FOR ROLE app_migrator IN SCHEMA users

@@ -6,12 +6,12 @@
     "build": "nest build",
     "format": "prettier --write \"apps/**/*.ts\" \"libs/**/*.ts\"",
     "lint": "eslint \"{apps,libs}/**/*.ts\" --fix",
-    "test": "node --experimental-vm-modules node_modules/.bin/jest",
-    "test:watch": "node --experimental-vm-modules node_modules/.bin/jest --watch",
-    "test:cov": "node --experimental-vm-modules node_modules/.bin/jest --coverage",
+    "test": "NODE_OPTIONS=--experimental-vm-modules jest",
+    "test:watch": "NODE_OPTIONS=--experimental-vm-modules jest --watch",
+    "test:cov": "NODE_OPTIONS=--experimental-vm-modules jest --coverage",
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test:integration": "NODE_OPTIONS=--experimental-vm-modules node_modules/.bin/jest --config jest.integration.config.js --runInBand"
+    "test:integration": "NODE_OPTIONS=--experimental-vm-modules jest --config jest.integration.config.js --runInBand"
   },
   "dependencies": {
     "@casl/ability": "^7.0.1",

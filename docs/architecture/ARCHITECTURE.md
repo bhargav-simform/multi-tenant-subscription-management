@@ -1061,6 +1061,13 @@ argument, so `organizationId` is never interpolated into SQL text.
 Migrations run as a separate `app_migrator` role. This split is what makes the guarantee real: no
 credential the application holds at runtime is capable of bypassing the policy.
 
+A third role, `app_rls_bypass` (§13.6, §32.4), exists solely to own the small set of narrow SECURITY
+DEFINER lookup functions §13.6 documents. It is `NOLOGIN` — no credential connects as it, ever — and
+`BYPASSRLS`, which is what makes those specific functions actually bypass RLS (a SECURITY DEFINER
+function owned by a NOBYPASSRLS role, like `app_migrator`, does not bypass FORCE ROW LEVEL SECURITY —
+confirmed empirically, §32.4). It does not weaken the three bullets above: `app_user` remains exactly
+as described, and §13.8's startup check verifies `app_user`, not this role.
+
 **Second mechanism — `TenantRepository`.** A base class wrapping TypeORM that injects
 `organization_id` on write and adds the predicate on read. This is *not* the guarantee; RLS is. It
 exists because good errors and readable code are worth having, and because two independent
@@ -1087,13 +1094,20 @@ genuine exceptions in the system are both narrow, named, and auditable rather th
   is subject to RLS exactly like any other `app_user` query, which is precisely why it returns
   nothing useful against a tenant table on its own.
 - **`users.get_user_organization_id(uuid)`**, a `SECURITY DEFINER` SQL function (§8.4) — the one
-  place a genuine RLS bypass exists, and it is deliberately as narrow as a bypass can be: it runs
-  with the function owner's (`app_migrator`'s) privileges, returns **exactly one column**
-  (`organization_id`, never role/email/name/anything else), and exists to answer exactly one
-  question — "which org does this user id belong to?" — for `auth-service`'s login/refresh role
-  lookup (§9.2), which has no way to know the answer in advance. `app_user` is granted `EXECUTE` on
-  this function and nothing broader; it cannot be used to read any other column, and every other
-  read of that user's data still goes through the normal RLS-scoped path afterward.
+  place a genuine RLS bypass exists, and it is deliberately as narrow as a bypass can be: it returns
+  **exactly one column** (`organization_id`, never role/email/name/anything else), and exists to
+  answer exactly one question — "which org does this user id belong to?" — for `auth-service`'s
+  login/refresh role lookup (§9.2), which has no way to know the answer in advance. `app_user` is
+  granted `EXECUTE` on this function and nothing broader; it cannot be used to read any other column,
+  and every other read of that user's data still goes through the normal RLS-scoped path afterward.
+  <br><br>
+  Its *owner* is deliberately **not** `app_migrator` — `app_migrator` is `NOBYPASSRLS`, and FORCE ROW
+  LEVEL SECURITY applies its policy to the table owner too, which Postgres extends to a SECURITY
+  DEFINER function's effective owner during execution (confirmed empirically; §32.4 records this as a
+  real defect this function shipped with). The actual bypass comes from ownership by
+  `app_rls_bypass` — a `NOLOGIN`, `BYPASSRLS` role nothing ever connects to directly, whose only
+  capability is owning this narrow class of function. `SECURITY DEFINER` alone, on a NOBYPASSRLS
+  owner, grants no RLS bypass at all.
 
 Neither exception is a parameter an endpoint could flip. Both are declared once, at the schema
 level, doing one specific, reviewable thing — which is the difference between an audited exception
@@ -2674,7 +2688,28 @@ not silently forgotten.
   seat-affecting event's payload, and `subscription-service` compares it against `used_seats`; or
   (b) a scheduled job *inside* `user-service` itself, which already owns both the counter and the
   tables that would recompute it. Neither is built.
-
+- **`resource-service` returns 503 for resource creation until an organisation's plan limit arrives
+  over Kafka.** `plan_limit_cache` is populated asynchronously, by consuming `SubscriptionAssigned`/
+  `SubscriptionChanged` (§8.6). Between an organisation being provisioned and that event being
+  consumed, `PlanLimitCacheRepository.lockForUpdate` finds no row and throws `503` with a retry
+  message. This is deliberate and fails closed: the alternatives were a permissive default
+  (unlimited storage — a window in which the plan limit silently does not apply, strictly worse
+  than a retryable failure) or a restrictive hardcoded default (fails closed correctly, but tells
+  the caller "you are out of storage" when the truth is "we do not know your ceiling yet", which
+  R6's clear-message requirement rules out). Close this by having onboarding's `SUBSCRIBED` step
+  wait for, or synchronously seed, the cache row — or accept the window as a POC limitation.
+- **A plan downgrade below current storage usage clamps `resource-service`'s ceiling rather than
+  applying it.** `ck_plan_limit_storage` enforces `used_storage_bytes <= max_storage_bytes`, so
+  lowering the ceiling under current usage would violate the constraint and send the event to the
+  DLQ, wedging the service on a stale ceiling. §19.10 makes this rare — `subscription-service`
+  rejects a downgrade below current usage inside its own locked transaction — but its check reads
+  its OWN `used_storage_bytes`, which §8.5 states plainly is an eventually-consistent display value
+  derived from this service's events, and which can therefore lag the authoritative counter at the
+  moment it decides. The upsert therefore clamps the new ceiling to at least current usage
+  (`GREATEST(excluded, used)`). Consequence, stated explicitly: for the window until usage drops,
+  the organisation's effective ceiling is its usage, so every new resource is rejected while no
+  existing resource is retroactively invalidated. Close this by having the downgrade path consult
+  `resource-service`'s authoritative counter rather than the denormalised copy.
 **Migration sequencing for `core_db` (§14.2), decided during `user-service`'s implementation.**
 `subs.subscriptions` is created by `user-service`'s own migration — minimally shaped with only the
 columns the §19 seat lock needs (`organization_id`, `used_seats`, `max_seats_snapshot`, and the
@@ -2810,6 +2845,59 @@ later service could reintroduce if the reason it was wrong is forgotten.
   `protected abstract get repository()` escape hatch was removed entirely in favour of a
   `protected abstract readonly entityTarget` every subclass sets once, so there is no longer any
   code path in this shared class capable of reaching an unscoped connection.
+- **`set_config('app.current_org', $1, true)` reverts to the EMPTY STRING on commit, never back to
+  NULL** — and that empty string persists for the rest of a pooled connection's session, since a
+  connection pool reuses connections that have already served a scoped transaction. Confirmed
+  empirically against a real Postgres container: before the fix below, a query on such a REUSED
+  connection with no fresh scope set (`runGlobal()`, the pre-scope phase of
+  `transactionWithDeferredScope`, the platform-admin "leave it unset" path) had its policy evaluate
+  `organization_id = ''::uuid`, which RAISES `invalid input syntax for type uuid` — turning the H1
+  cross-tenant-detection retrofit's own probe into a 500, and silently disabling the detection event
+  it exists to publish. Fixed at the single shared source, `enableTenantRls()`: the policy now wraps
+  the setting in `NULLIF(current_setting(...), '')` before the cast, restoring the documented
+  "unscoped -> zero rows, no error" behaviour exactly, confirmed against a real container. Applied to
+  every already-committed table via a follow-up migration per service (new tables get the fix
+  automatically, since they all go through the same helper).
+- **A SECURITY DEFINER function owned by a NOBYPASSRLS role does NOT bypass FORCE ROW LEVEL
+  SECURITY — confirmed empirically, and this was a severe, previously-undetected bug in
+  ALREADY-COMMITTED, production-critical code.** §13.6's narrow-exception pattern
+  (`users.get_user_organization_id`, `subs.get_usage_aggregates`) was built on the assumption that
+  `SECURITY DEFINER` alone makes a function "run with the owner's privileges" in a way that bypasses
+  RLS. It does not, when the table is FORCE-protected: FORCE ROW LEVEL SECURITY exists specifically
+  to apply the policy to the table owner too, and Postgres extends that to a SECURITY DEFINER
+  function's effective owner during execution — a function owned by `app_migrator` (NOBYPASSRLS,
+  every role in this system until this fix) gets no RLS bypass inside it at all, silently returning
+  nothing instead of the one row/column it is meant to expose. Postgres's own error message, when an
+  in-function `SET row_security = off` workaround was attempted, names the actual fix directly:
+  give the owner `BYPASSRLS`.
+  <br><br>
+  Consequence: `users.get_user_organization_id` — which `UserRepository.findRoleByUserId` calls at
+  EVERY login and token refresh, via auth-service's `resolveRoles()` — has always returned NULL in
+  production, for every user, causing every real login to take the fail-closed
+  "account not fully provisioned yet" branch. `subs.get_usage_aggregates` — the platform-admin usage
+  view — has always returned zero rows for every organisation. Neither had ever been exercised
+  against a real Postgres container; every existing test mocked `runGlobal()` rather than the
+  database underneath it, so nothing could have caught this short of the empirical verification this
+  codebase's testing philosophy already demanded elsewhere.
+  <br><br>
+  Fixed by introducing `app_rls_bypass` (docker/postgres/init.sh, and this repo's Testcontainers test
+  setup): a `NOLOGIN`, `BYPASSRLS` role that nothing ever connects to directly — its only job is
+  owning this narrow class of single-row, single-column lookup function. `BYPASSRLS` on this role is
+  safe despite the name: it can never be connected to, so it can never be used to run an arbitrary
+  query; its only capability is being the transferred owner of specific, reviewed functions that
+  themselves grant `EXECUTE` narrowly to `app_user` and expose only the one column each is documented
+  to return. `app_user` itself stays `NOBYPASSRLS` everywhere, unchanged — §13.8's startup check
+  verifies that role, not this one. Every existing and new narrow-exception function
+  (`get_user_organization_id`, `get_usage_aggregates`, and the two new ones this same round of fixes
+  added — `resource_exists`, `users.user_exists`, for the H1 cross-tenant-detection retrofit) had its
+  ownership transferred via a migration, with `BYPASSRLS` skipping only the POLICY check — ordinary
+  object privileges (`SELECT` on the underlying table) still had to be granted separately.
+  <br><br>
+  Both bugs now have a real Testcontainers regression test
+  (`test/integration/user-service/security-definer-bypass.integration.spec.ts`,
+  `test/integration/subscription-service/security-definer-bypass.integration.spec.ts`) that exercises
+  the actual production function against a real Postgres container and was verified, by temporarily
+  reverting the ownership transfer, to fail without the fix.
 
 ---
 

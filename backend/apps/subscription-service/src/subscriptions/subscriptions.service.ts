@@ -64,9 +64,18 @@ export class SubscriptionsService {
       );
     });
 
+    // Carries the plan's limits for the same reason SubscriptionChanged does
+    // (see changePlan below). This event is what first populates
+    // resource-service's plan_limit_cache for a newly-onboarded organisation
+    // (§8.6) — without the ceiling in the payload, that service could not
+    // enforce a storage limit until some later plan change happened to
+    // deliver it.
     await this.publishEvent(organizationId, EVENT_TYPES.SUBSCRIPTION_ASSIGNED, {
       subscriptionId,
       planCode: plan.code,
+      planId: plan.id,
+      maxSeats: plan.maxUsers,
+      maxStorageBytes: plan.maxStorageBytes,
     });
 
     return { subscriptionId };
@@ -171,10 +180,19 @@ export class SubscriptionsService {
       return { fromPlanId: current.planId };
     });
 
+    // §8.6: `maxStorageBytes`/`maxSeats` are carried in the payload rather
+    // than left for a consumer to resolve from `toPlanId`. resource-service's
+    // plan_limit_cache needs the new storage ceiling, and the alternative —
+    // a consumer calling GET /plans over HTTP to translate the id — would put
+    // a synchronous network dependency inside an event handler for a value
+    // THIS service already holds at publish time. An event should carry what
+    // its consumers need to act (§17.3).
     await this.publishEvent(organizationId, EVENT_TYPES.SUBSCRIPTION_CHANGED, {
       fromPlanId: result.fromPlanId,
       toPlanId: targetPlan.id,
       toPlanCode: targetPlan.code,
+      maxSeats: targetPlan.maxUsers,
+      maxStorageBytes: targetPlan.maxStorageBytes,
     });
 
     return this.getCurrent();
