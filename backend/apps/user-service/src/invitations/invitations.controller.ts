@@ -1,7 +1,6 @@
 import { Body, Controller, Delete, Param, Post } from '@nestjs/common';
 import { Action, Subject } from '@app/common';
 import { CheckAbility } from '@app/authorization';
-import { Public } from '@app/tenant-context';
 import { UsersService } from '../users/users.service';
 import { AcceptInvitationDto } from './dto/accept-invitation.dto';
 import type { UserResponseDto } from '../users/dto/user-response.dto';
@@ -11,13 +10,20 @@ export class InvitationsController {
   constructor(private readonly users: UsersService) {}
 
   /**
-   * §11.5: one of exactly three @Public() gateway routes. The gateway signs
-   * an ANONYMOUS context for this route (§9.4) — this service's
-   * InternalContextGuard still verifies that signature; the handler simply
-   * has no caller identity to read (there is none — an invitee has no
-   * account yet, and the token itself is the credential, §11.5).
+   * §11.5: this is ONE of exactly three routes the CLIENT reaches with no
+   * authenticated identity — but that "public" status belongs to api-gateway
+   * alone (its JwtAuthGuard, its own @Public() from libs/auth). This service's
+   * own @app/tenant-context Public() decorator must NEVER appear on a
+   * downstream route (§13.7 row 6, and InternalContextGuard's own comment) —
+   * doing so was a real, already-committed defect: it skipped signature
+   * verification for this route entirely, so anyone able to reach this
+   * service directly (bypassing the gateway) could call it with no
+   * x-internal-context signature at all. Fixed by removing the decorator.
+   * The gateway signs an ANONYMOUS context for this route (§9.4) — an invitee
+   * has no account yet, and the token itself is the credential — and this
+   * service's InternalContextGuard verifies that signature exactly like any
+   * other request; the handler simply has no caller identity to read.
    */
-  @Public()
   @Post(':token/accept')
   accept(
     @Param('token') token: string,
