@@ -19,7 +19,12 @@ import { AuditModule } from './audit/audit.module';
 import { EventsModule } from './events/events.module';
 import { HealthController } from './health.controller';
 
-/** Guard order matches every other service (§13.2): InternalContextGuard, then CaslAbilityGuard. */
+/**
+ * Request lifecycle matches every other service (§13.2) — see tenant-service's
+ * AppModule for the full breakdown: TenantContextMiddleware verifies + opens
+ * the ALS scope, then InternalContextGuard (defense in depth) and
+ * CaslAbilityGuard run against it.
+ */
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),

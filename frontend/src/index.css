@@ -1,111 +1,500 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   DESIGN TOKENS — Raw primitives referenced by @theme inline.
+   Rule: NO component or page file should ever hardcode a hex, rgb, or oklch.
+   All values live here and are consumed via Tailwind utilities or var().
+
+   Palette: TEAL (primary) + SLATE (neutral). Structurally identical to the
+   SimERP token system this was adapted from; only the hues differ.
+   ───────────────────────────────────────────────────────────────────────────── */
 :root {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --bg: #fff;
-  --border: #e5e4e7;
-  --code-bg: #f4f3ec;
-  --accent: #aa3bff;
-  --accent-bg: rgba(170, 59, 255, 0.1);
-  --accent-border: rgba(170, 59, 255, 0.5);
-  --social-bg: rgba(244, 243, 236, 0.5);
-  --shadow:
-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+    /* ── Teal palette (primary brand) ────────────────────────── */
+    --color-teal-50: #f0fdfa;
+    --color-teal-100: #ccfbf1;
+    --color-teal-200: #99f6e4;
+    --color-teal-300: #5eead4;
+    --color-teal-400: #2dd4bf;
+    --color-teal-500: #14b8a6;
+    --color-teal-600: #0d9488;
+    --color-teal-700: #0f766e;
+    --color-teal-800: #115e59;
+    --color-teal-900: #134e4a;
+    --color-teal-950: #042f2e;
 
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --mono: ui-monospace, Consolas, monospace;
+    /* ── Slate palette (neutral) ─────────────────────────────── */
+    --color-slate-50: #f8fafc;
+    --color-slate-100: #f1f5f9;
+    --color-slate-200: #e2e8f0;
+    --color-slate-300: #cbd5e1;
+    --color-slate-400: #94a3b8;
+    --color-slate-500: #64748b;
+    --color-slate-600: #475569;
+    --color-slate-700: #334155;
+    --color-slate-800: #1e293b;
+    --color-slate-900: #0f172a;
 
-  font: 18px/145% var(--sans);
-  letter-spacing: 0.18px;
-  color-scheme: light dark;
-  color: var(--text);
-  background: var(--bg);
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+    /* ── Legacy alias tokens ─────────────────────────────────── */
+    --color-primary-hover: #0f766e; /* teal-700 */
+    --color-primary-light: #f0fdfa; /* teal-50  */
+    --color-surface: #f8fafc;
+    --color-text-primary: #0f172a;
+    --color-text-secondary: #64748b;
+    --color-error: #dc2626;
+    --color-success: #16a34a;
+    --color-warning: #d97706;
+    --color-white: #ffffff;
 
-  @media (max-width: 1024px) {
-    font-size: 16px;
-  }
+    /* ── Table ───────────────────────────────────────────────── */
+    --table-header-bg: var(--color-white);
+    --table-header-text: #020617; /* slate-950 */
+    --table-border-strong: #cbd5e1; /* slate-300 — sticky column divider */
+
+    /* ── Usage meters (plan limits) ──────────────────────────────────────────
+       A seat/storage meter is the one place in this product where colour carries
+       real meaning: it is how an org admin learns a limit is about to refuse an
+       action. Thresholds live in constants/plan.ts, the colours here. */
+    --meter-track: #e2e8f0; /* slate-200 */
+    --meter-safe: #0d9488; /* teal-600   — under the warn threshold */
+    --meter-warn: #d97706; /* amber-600  — approaching the cap      */
+    --meter-full: #dc2626; /* red-600    — at or over the cap       */
+
+    /* ── Badges ──────────────────────────────────────────────── */
+    --badge-secondary-bg: #f1f5f9;
+    --badge-secondary-text: #0f172a;
+    --badge-teal-bg: #ccfbf1;
+    --badge-teal-border: #5eead4;
+    --badge-teal-text: #0f766e;
+    --badge-green-bg: #dcfce7;
+    --badge-green-border: #86efac;
+    --badge-green-text: #15803d;
+    --badge-amber-bg: #fef3c7;
+    --badge-amber-border: #fcd34d;
+    --badge-amber-text: #b45309;
+    --badge-red-bg: #fee2e2;
+    --badge-red-border: #fca5a5;
+    --badge-red-text: #b91c1c;
+    --badge-slate-bg: #f1f5f9;
+    --badge-slate-border: #cbd5e1;
+    --badge-slate-text: #475569;
+    --badge-violet-bg: #ede9fe;
+    --badge-violet-border: #ddd6fe;
+    --badge-violet-text: #6d28d9;
+
+    /* ── Toast (Sonner) + inline Alert banners ───────────────── */
+    --toast-success-text: #15803d;
+    --toast-success-border: #4ade80;
+    --toast-success-background: #f0fdf4;
+    --toast-error-text: #b91c1c;
+    --toast-error-border: #f87171;
+    --toast-error-background: #fef2f2;
+    --toast-warning-icon: #b45309;
+    --toast-warning-text: #b45309;
+    --toast-warning-border: #fbbf24;
+    --toast-warning-background: #fffbeb;
+    --toast-info-icon: #0f766e;
+    --toast-info-text: #0f766e;
+    --toast-info-border: #2dd4bf;
+    --toast-info-background: #f0fdfa;
+    --toast-description-text: #1e293b;
+
+    /* ── Component size tokens ───────────────────────────────── */
+    --badge-height: 1.625rem; /* 26px */
+    --section-header-bg: #f1f5f9;
+
+    /* ── Radius ──────────────────────────────────────────────── */
+    --radius: 0.625rem;
+
+    /* ── Shadows ─────────────────────────────────────────────── */
+    --shadow-card: 0px 1px 2px 0px rgba(15, 23, 42, 0.05);
+
+    /* ── shadcn semantic palette ─────────────────────────────── */
+    --background: #f8fafc;
+    --foreground: #0f172a;
+    --card: #ffffff;
+    --card-foreground: #0f172a;
+    --popover: #ffffff;
+    --popover-foreground: #0f172a;
+    --primary: #0d9488; /* teal-600 */
+    --primary-foreground: #ffffff;
+    --secondary: #f1f5f9; /* slate-100 */
+    --secondary-foreground: #134e4a; /* teal-900 */
+    --muted: #f1f5f9;
+    --muted-foreground: #64748b;
+    --accent: #f0fdfa; /* teal-50 */
+    --accent-foreground: #134e4a;
+    --destructive: #dc2626;
+    --border: #e2e8f0;
+    --input: #e2e8f0;
+    --ring: #0d9488;
+
+    --chart-1: #0d9488;
+    --chart-2: #0ea5e9;
+    --chart-3: #8b5cf6;
+    --chart-4: #f59e0b;
+    --chart-5: #64748b;
+
+    /* ── Sidebar — deep teal, mirroring SimERP's deep-violet rail ─────────── */
+    --sidebar: #134e4a;
+    --sidebar-foreground: #fafafa;
+    --sidebar-primary: #ccfbf1;
+    --sidebar-primary-foreground: #134e4a;
+    --sidebar-accent: #ffffff;
+    --sidebar-accent-foreground: #171717;
+    --sidebar-border: rgba(255, 255, 255, 0.2);
+    --sidebar-ring: rgba(255, 255, 255, 0.4);
+    --sidebar-gradient-from: #134e4a;
+    --sidebar-gradient-to: #115e59;
+
+    /* ── Platform-admin rail ─────────────────────────────────────────────────
+       Platform admins see metadata only, never tenant content (§13.6). The
+       admin shell is a visibly different colour so it is obvious at a glance
+       which side of that boundary a screen is on. */
+    --sidebar-admin-from: #1e293b; /* slate-800 */
+    --sidebar-admin-to: #334155; /* slate-700 */
+
+    --alert-background: #f0fdfa;
+    --tooltip-background: #f1f5f9;
+    --overlay-background: rgba(15, 23, 42, 0.4);
+    --accordion-border: rgba(255, 255, 255, 0.2);
+    --mask-background: #d9d9d9;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    --border: #2e303a;
-    --code-bg: #1f2028;
-    --accent: #c084fc;
-    --accent-bg: rgba(192, 132, 252, 0.15);
-    --accent-border: rgba(192, 132, 252, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
-    --shadow:
-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
-  }
-
-  #social .button-icon {
-    filter: invert(1) brightness(2);
-  }
-}
-
-#root {
-  width: 1126px;
-  max-width: 100%;
-  margin: 0 auto;
-  text-align: center;
-  border-inline: 1px solid var(--border);
-  min-height: 100svh;
-  display: flex;
-  flex-direction: column;
-  box-sizing: border-box;
+* {
+    box-sizing: border-box;
 }
 
 body {
-  margin: 0;
+    margin: 0;
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
 }
 
-h1,
-h2 {
-  font-family: var(--heading);
-  font-weight: 500;
-  color: var(--text-h);
+/* Keep all input-like surfaces white across the app (single-point override). */
+:where(input, textarea, [data-slot='select-trigger'], [role='combobox']) {
+    background-color: var(--color-white);
 }
 
-h1 {
-  font-size: 56px;
-  letter-spacing: -1.68px;
-  margin: 32px 0;
-  @media (max-width: 1024px) {
-    font-size: 36px;
-    margin: 20px 0;
-  }
-}
-h2 {
-  font-size: 24px;
-  line-height: 118%;
-  letter-spacing: -0.24px;
-  margin: 0 0 8px;
-  @media (max-width: 1024px) {
-    font-size: 20px;
-  }
-}
-p {
-  margin: 0;
+/* ─────────────────────────────────────────────────────────────────────────────
+   TAILWIND THEME MAPPING — every token above becomes a Tailwind utility.
+   ───────────────────────────────────────────────────────────────────────────── */
+@theme inline {
+    --radius-sm: calc(var(--radius) - 4px);
+    --radius-md: calc(var(--radius) - 2px);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) + 4px);
+    --radius-2xl: calc(var(--radius) + 8px);
+
+    --color-background: var(--background);
+    --color-foreground: var(--foreground);
+    --color-card: var(--card);
+    --color-card-foreground: var(--card-foreground);
+    --color-popover: var(--popover);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-primary: var(--primary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-primary-hover: #0f766e;
+    --color-primary-light: #f0fdfa;
+    --color-secondary: var(--secondary);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-muted: var(--muted);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-accent: var(--accent);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-destructive: var(--destructive);
+    --color-border: var(--border);
+    --color-input: var(--input);
+    --color-ring: var(--ring);
+    --color-accordion-border: var(--accordion-border);
+
+    --color-chart-1: var(--chart-1);
+    --color-chart-2: var(--chart-2);
+    --color-chart-3: var(--chart-3);
+    --color-chart-4: var(--chart-4);
+    --color-chart-5: var(--chart-5);
+
+    --color-sidebar: var(--sidebar);
+    --color-sidebar-foreground: var(--sidebar-foreground);
+    --color-sidebar-primary: var(--sidebar-primary);
+    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+    --color-sidebar-accent: var(--sidebar-accent);
+    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+    --color-sidebar-border: var(--sidebar-border);
+    --color-sidebar-ring: var(--sidebar-ring);
+    --color-sidebar-gradient-from: var(--sidebar-gradient-from);
+    --color-sidebar-gradient-to: var(--sidebar-gradient-to);
+    --color-overlay-background: var(--overlay-background);
+    --color-white: #ffffff;
+
+    --color-table-header-bg: var(--table-header-bg);
+    --color-table-header-text: var(--table-header-text);
+    --color-table-border-strong: var(--table-border-strong);
+
+    --color-meter-track: var(--meter-track);
+    --color-meter-safe: var(--meter-safe);
+    --color-meter-warn: var(--meter-warn);
+    --color-meter-full: var(--meter-full);
+
+    --color-badge-secondary-bg: var(--badge-secondary-bg);
+    --color-badge-secondary-text: var(--badge-secondary-text);
+    --color-badge-teal-bg: var(--badge-teal-bg);
+    --color-badge-teal-border: var(--badge-teal-border);
+    --color-badge-teal-text: var(--badge-teal-text);
+    --color-badge-green-bg: var(--badge-green-bg);
+    --color-badge-green-border: var(--badge-green-border);
+    --color-badge-green-text: var(--badge-green-text);
+    --color-badge-amber-bg: var(--badge-amber-bg);
+    --color-badge-amber-border: var(--badge-amber-border);
+    --color-badge-amber-text: var(--badge-amber-text);
+    --color-badge-red-bg: var(--badge-red-bg);
+    --color-badge-red-border: var(--badge-red-border);
+    --color-badge-red-text: var(--badge-red-text);
+    --color-badge-slate-bg: var(--badge-slate-bg);
+    --color-badge-slate-border: var(--badge-slate-border);
+    --color-badge-slate-text: var(--badge-slate-text);
+    --color-badge-violet-bg: var(--badge-violet-bg);
+    --color-badge-violet-border: var(--badge-violet-border);
+    --color-badge-violet-text: var(--badge-violet-text);
+
+    --color-toast-warning-background: var(--toast-warning-background);
+    --color-toast-warning-border: var(--toast-warning-border);
+    --color-toast-warning-text: var(--toast-warning-text);
+    --color-section-header-bg: var(--section-header-bg);
+    --color-alert-background: var(--alert-background);
+
+    --color-teal-50: #f0fdfa;
+    --color-teal-100: #ccfbf1;
+    --color-teal-200: #99f6e4;
+    --color-teal-300: #5eead4;
+    --color-teal-400: #2dd4bf;
+    --color-teal-500: #14b8a6;
+    --color-teal-600: #0d9488;
+    --color-teal-700: #0f766e;
+    --color-teal-800: #115e59;
+    --color-teal-900: #134e4a;
+
+    --size-badge-height: var(--badge-height);
+
+    /* ── Font families ───────────────────────────────────────── */
+    --font-sans: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+
+    --text-xxs: 0.5rem;
+    --text-xs: 0.75rem;
+    --text-xs--line-height: 1rem;
+    --text-sm: 0.875rem;
+    --text-sm--line-height: 1.25rem;
+    --text-base: 1rem;
+    --text-base--line-height: 1.5rem;
+    --text-lg: 1.125rem;
+    --text-lg--line-height: 1.75rem;
+    --text-xl: 1.25rem;
+    --text-xl--line-height: 1.75rem;
+    --text-2xl: 1.5rem;
+    --text-2xl--line-height: 2rem;
+    --text-3xl: 1.875rem;
+    --text-3xl--line-height: 2.25rem;
+    --text-4xl: 2.25rem;
+    --text-4xl--line-height: 2.5rem;
+
+    --font-weight-normal: 400;
+    --font-weight-medium: 500;
+    --font-weight-semibold: 600;
+    --font-weight-bold: 700;
+    --font-weight-extrabold: 800;
+
+    --shadow-sm: var(--shadow-card);
+
+    --scrollbar-thumb: #cbd5e1;
+    --scrollbar-thumb-hover: #94a3b8;
+    --scrollbar-track: transparent;
+    --scrollbar-radius: 8px;
+    --scrollbar-size: 6px;
 }
 
-code,
-.counter {
-  font-family: var(--mono);
-  display: inline-flex;
-  border-radius: 4px;
-  color: var(--text-h);
+/* ── Scrollbar ───────────────────────────────────────────────── */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
 }
 
-code {
-  font-size: 15px;
-  line-height: 135%;
-  padding: 4px 8px;
-  background: var(--code-bg);
+*::-webkit-scrollbar {
+    width: var(--scrollbar-size);
+    height: var(--scrollbar-size);
+}
+
+*::-webkit-scrollbar-track {
+    background: var(--scrollbar-track);
+}
+
+*::-webkit-scrollbar-thumb {
+    background-color: var(--scrollbar-thumb);
+    border-radius: var(--scrollbar-radius);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+    background-color: var(--scrollbar-thumb-hover);
+}
+
+.scrollbar-none {
+    scrollbar-width: none;
+}
+
+.scrollbar-none::-webkit-scrollbar {
+    display: none;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   BASE LAYER
+   ───────────────────────────────────────────────────────────────────────────── */
+@layer base {
+    * {
+        @apply border-border outline-ring/50;
+    }
+
+    body {
+        @apply bg-background text-foreground font-sans antialiased;
+    }
+
+    button:not(:disabled),
+    [role='button']:not(:disabled) {
+        cursor: pointer;
+    }
+
+    h1 {
+        @apply scroll-m-20 text-3xl font-bold tracking-tight;
+    }
+
+    h2 {
+        @apply scroll-m-20 text-2xl font-semibold tracking-tight;
+    }
+
+    h3 {
+        @apply scroll-m-20 text-xl font-semibold tracking-tight;
+    }
+
+    h4 {
+        @apply scroll-m-20 text-lg font-semibold tracking-tight;
+    }
+
+    p {
+        @apply leading-6;
+    }
+
+    code {
+        @apply relative rounded bg-muted px-[0.3rem] py-[0.2rem] font-mono text-sm font-semibold;
+    }
+
+    small {
+        @apply text-sm font-medium leading-none;
+    }
+
+    table {
+        @apply w-full;
+    }
+
+    th {
+        @apply p-2 text-left font-semibold;
+    }
+
+    td {
+        @apply p-2 text-left;
+    }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   COMPONENT UTILITIES
+   ───────────────────────────────────────────────────────────────────────────── */
+@layer components {
+    .bg-sidebar-gradient {
+        background: linear-gradient(to bottom, var(--sidebar-gradient-from) 20%, var(--sidebar-gradient-to));
+    }
+
+    /* The platform-admin shell is deliberately a different colour from the tenant
+       shell — the §13.6 metadata/content boundary, made visible. */
+    .bg-sidebar-admin-gradient {
+        background: linear-gradient(to bottom, var(--sidebar-admin-from) 20%, var(--sidebar-admin-to));
+    }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   SONNER TOAST
+   ───────────────────────────────────────────────────────────────────────────── */
+[data-sonner-toast] {
+    border: none !important;
+    border-left: 3px solid var(--border) !important;
+    box-shadow:
+        0 10px 15px 0 rgba(0, 0, 0, 0.1),
+        0 4px 6px 0 rgba(0, 0, 0, 0.1) !important;
+    border-radius: var(--radius) !important;
+}
+
+[data-sonner-toast][data-type='success'] {
+    background: var(--toast-success-background) !important;
+    border-left-color: var(--toast-success-border) !important;
+}
+
+[data-sonner-toast][data-type='success'] [data-title] {
+    color: var(--toast-success-text) !important;
+    font-weight: 600 !important;
+}
+
+[data-sonner-toast][data-type='error'] {
+    background: var(--toast-error-background) !important;
+    border-left-color: var(--toast-error-border) !important;
+}
+
+[data-sonner-toast][data-type='error'] [data-title] {
+    color: var(--toast-error-text) !important;
+    font-weight: 600 !important;
+}
+
+[data-sonner-toast][data-type='warning'] {
+    background: var(--toast-warning-background) !important;
+    border-left-color: var(--toast-warning-border) !important;
+}
+
+[data-sonner-toast][data-type='warning'] [data-title] {
+    color: var(--toast-warning-text) !important;
+    font-weight: 600 !important;
+}
+
+[data-sonner-toast][data-type='info'] {
+    background: var(--toast-info-background) !important;
+    border-left-color: var(--toast-info-border) !important;
+}
+
+[data-sonner-toast][data-type='info'] [data-title] {
+    color: var(--toast-info-text) !important;
+    font-weight: 600 !important;
+}
+
+[data-sonner-toast] [data-description] {
+    color: var(--toast-description-text) !important;
+    font-weight: 500 !important;
+}
+
+[data-sonner-toast] [data-icon] svg {
+    width: 20px !important;
+    height: 20px !important;
+}
+
+[data-sonner-toast][data-type='success'] [data-icon] svg {
+    color: var(--toast-success-text) !important;
+}
+
+[data-sonner-toast][data-type='error'] [data-icon] svg {
+    color: var(--toast-error-text) !important;
+}
+
+[data-sonner-toast][data-type='warning'] [data-icon] svg {
+    color: var(--toast-warning-icon) !important;
+}
+
+[data-sonner-toast][data-type='info'] [data-icon] svg {
+    color: var(--toast-info-icon) !important;
 }

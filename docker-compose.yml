@@ -1,19 +1,23 @@
 # docs/architecture/ARCHITECTURE.md §27. `docker compose up` with a filled-in
 # .env is the whole setup procedure — no manual migration step, no seeding step.
 #
-# §27.1 says eleven containers and two published ports. This file has TEN and
-# ONE: `frontend` is not here yet (it is a bare Vite scaffold, not a built
-# application), so its container and its 5173 → host mapping are deliberately
-# absent and will be added when it exists.
+# §27.1's eleven containers and two published ports, now both true: `frontend`
+# is a built static bundle (frontend/Dockerfile), not the bare Vite scaffold
+# the earlier note here described, and it has its own 5173 → host mapping.
 #
-# §10.5 layer 1, expressed as configuration rather than prose: EXACTLY ONE
-# `ports:` mapping appears in this entire file, on api-gateway. postgres, redis,
-# kafka and the six non-gateway services are reachable only on the internal
-# bridge network. That is a property you can grep for.
+# §10.5 layer 1, expressed as configuration rather than prose: exactly TWO
+# `ports:` mappings appear in this file — api-gateway (the only backend entry
+# point) and frontend (the only thing a browser loads directly). postgres,
+# redis, kafka and the six non-gateway backend services remain reachable only
+# on the internal bridge network; frontend isn't on that network at all,
+# because it never talks to a backend container directly — its JS runs in the
+# browser and calls api-gateway's own host-published port, outside every
+# Docker network this file defines.
 #
 # §27.4 exclusions honoured: no Kubernetes, no service mesh, no
 # Prometheus/Grafana, no Elasticsearch, no RabbitMQ, no ZooKeeper (Kafka runs in
-# KRaft mode), no nginx.
+# KRaft mode). nginx appears exactly once, as frontend's static file server —
+# never as a proxy in front of api-gateway.
 
 name: mtsm
 
@@ -352,6 +356,46 @@ services:
       resource-service:
         condition: service_started
       audit-service:
+        condition: service_started
+
+  # ── Frontend ─────────────────────────────────────────────────────────────
+  #
+  # The eleventh container and the second published port (§27.1 finally
+  # matches this file). Built as a static bundle by frontend/Dockerfile and
+  # served by nginx — there is no Node runtime and no proxying here, so it is
+  # deliberately NOT attached to `internal` at all. Every other service is on
+  # that network because containers talk to each other on it; frontend never
+  # talks to a container — its compiled JS runs in the browser and calls
+  # api-gateway's own host-published port directly, which means this
+  # container needs no network path to any backend service, only the default
+  # bridge compose gives every service so `docker compose up` can build and
+  # start it.
+  #
+  # VITE_API_BASE_URL is a BUILD arg, not a runtime `environment:` var — Vite
+  # inlines import.meta.env values into the compiled JS at build time, so
+  # setting it at container start would have no effect. It defaults to
+  # api-gateway's HOST-published address (127.0.0.1:3000/api/v1) because the
+  # code that reads it runs in the browser, outside every Docker network this
+  # compose file defines — the same reason api-gateway's CORS_ORIGINS default
+  # is this container's own host-published origin, http://localhost:5173.
+  frontend:
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:3000/api/v1}
+    ports:
+      - '127.0.0.1:5173:5173'
+    healthcheck:
+      <<: *service-healthcheck
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:5173/']
+    depends_on:
+      # Purely so `docker compose up` brings up something useful in one shot —
+      # like api-gateway's own downstream depends_on, this is NOT a health gate.
+      # A frontend that starts before the gateway is ready simply shows a
+      # failed request until the gateway catches up.
+      api-gateway:
         condition: service_started
 
 networks:

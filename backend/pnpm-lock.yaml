@@ -172,7 +172,15 @@ importers:
         specifier: ^8.70.0
         version: 8.70.0(eslint@10.10.0)(typescript@5.9.3)
 
+  apps/api-gateway: {}
+
+  apps/audit-service: {}
+
   apps/auth-service: {}
+
+  apps/resource-service: {}
+
+  apps/subscription-service: {}
 
   apps/tenant-service: {}
 

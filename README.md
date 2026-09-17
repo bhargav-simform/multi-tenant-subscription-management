@@ -6,7 +6,10 @@ and self-service organisation onboarding.
 > **Status: backend complete (7 services, 170 unit + 62 integration tests). Docker infrastructure
 > complete — the full stack has been brought up and a real end-to-end signup verified against it.
 > Two pre-existing DI defects in `libs/database` and `libs/kafka` currently stop the six
-> database-owning services from booting; see "Known blocker" below. Frontend is a Vite scaffold.**
+> database-owning services from booting; see "Known blocker" below. Frontend is a built React SPA
+> (login/signup, dashboard, resources incl. the H1 cross-tenant detail view, user management, plan
+> & usage, audit log, and a structurally separate platform-admin shell) with its own Dockerfile,
+> now wired into `docker-compose.yml` as the eleventh container.**
 
 ## The problem
 
@@ -47,7 +50,7 @@ each exists and §14 who owns what.
 
 ```
 backend/     NestJS monorepo — pnpm workspace   (7 services, complete)
-frontend/    React SPA                          (Vite scaffold only)
+frontend/    React SPA — pnpm, Vite, Tailwind    (all screens, own Dockerfile)
 docker/      postgres init + one-shot migrator
 docs/        architecture + brief
 .claude/     skills and agents governing implementation
@@ -65,11 +68,17 @@ aspiration. There is no separate migration step and no seeding step: a one-shot 
 container runs every service's migrations as `app_migrator`, seeds the platform admin, and exits
 before any application service starts (`depends_on: condition: service_completed_successfully`).
 
-Ten containers, **one published port**: only `api-gateway` is reachable from the host, on
-<http://localhost:3000>. Postgres, Redis, Kafka and the six other services are on an internal
-bridge network with no port mapping at all — §10.5 layer 1, expressed as configuration.
-(§27.1 describes eleven containers and two ports; the eleventh is `frontend`, which is still a
-bare Vite scaffold and is deliberately not in `docker-compose.yml` yet.)
+Eleven containers, **two published ports**, matching §27.1: `api-gateway` on
+<http://localhost:3000> and `frontend` on <http://localhost:5173>. Postgres, Redis, Kafka and the
+six non-gateway backend services are on an internal bridge network with no port mapping at all —
+§10.5 layer 1, expressed as configuration. `frontend` isn't on that internal network at all: its
+compiled JS runs in the browser and calls `api-gateway`'s host-published port directly, so it has
+no need for a container-to-container path to any backend service.
+
+Note the backend's "Known blocker" below still applies: with the six database-owning services
+failing to boot, the frontend's own container comes up and serves the SPA correctly, but most
+screens will show a failed request until that DI defect is fixed — `docker compose up` bringing
+up the frontend container is not the same claim as the full stack answering requests end to end.
 
 ### Seed data
 

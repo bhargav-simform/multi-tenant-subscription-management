@@ -19,9 +19,11 @@ import { AuthModule } from './auth/auth.module';
 import { HealthController } from './health.controller';
 
 /**
- * Guard order matches every other service (§13.2, §8.2): InternalContextGuard
- * first, then CaslAbilityGuard. auth-service's own routes carry no
- * @CheckAbility() — login/refresh/logout have no role-based distinction
+ * Request lifecycle matches every other service (§13.2, §8.2) — see
+ * tenant-service's AppModule for the full breakdown: TenantContextMiddleware
+ * verifies + opens the ALS scope, then InternalContextGuard (defense in
+ * depth) and CaslAbilityGuard run against it. auth-service's own routes carry
+ * no @CheckAbility() — login/refresh/logout have no role-based distinction
  * (anyone with valid credentials may use them), and /internal/auth/credentials
  * is reachable by any service that can produce a valid signed context, which
  * in practice is only tenant-service (network isolation, §10.5).

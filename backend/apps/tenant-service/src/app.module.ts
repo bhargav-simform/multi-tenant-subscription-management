@@ -16,10 +16,15 @@ import { OnboardingSaga } from './onboarding/onboarding-saga.entity';
 import { HealthController } from './health.controller';
 
 /**
- * Guard order (§8.2 request lifecycle, §13.2):
- *   1. InternalContextGuard  — verifies the signed header, rejects 401
- *   2. TenantContextMiddleware (registered below) — opens the ALS scope
- *   3. CaslAbilityGuard      — the real authorization decision (§12.5)
+ * Request lifecycle (§8.2, §13.2):
+ *   1. TenantContextMiddleware (registered below) — verifies the signed
+ *      header, rejects unauthenticated/invalid requests, and opens the ALS
+ *      scope. Runs BEFORE every guard (middleware always does), which is why
+ *      this — not a guard — is where verification lives: only middleware
+ *      wraps every guard, pipe, interceptor and handler that follows it.
+ *   2. InternalContextGuard  — defense-in-depth: a scope must already be open
+ *   3. CaslAbilityGuard      — the real authorization decision (§12.5), reads
+ *      the scope the middleware opened
  * ValidationPipe runs as part of Nest's own pipeline before the handler body.
  */
 @Module({

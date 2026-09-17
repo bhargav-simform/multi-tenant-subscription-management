@@ -1,0 +1,106 @@
+import type { ReactNode } from 'react';
+import { AlertCircleIcon, InboxIcon, Loader2Icon, SearchXIcon } from 'lucide-react';
+
+import { Button } from '@/components/ui/button';
+import { LABELS } from '@/constants/labels';
+import { cn } from '@/lib/utils';
+
+interface StateShellProps {
+    icon: ReactNode;
+    title: string;
+    body?: string | undefined;
+    action?: ReactNode;
+    className?: string | undefined;
+}
+
+function StateShell({ icon, title, body, action, className }: StateShellProps) {
+    return (
+        <div className={cn('flex flex-col items-center justify-center gap-3 px-6 py-12 text-center', className)}>
+            <div className="text-muted-foreground" aria-hidden="true">
+                {icon}
+            </div>
+            <div className="flex flex-col gap-1">
+                <p className="text-sm font-medium text-foreground">{title}</p>
+                {body && <p className="max-w-md text-sm text-muted-foreground">{body}</p>}
+            </div>
+            {action}
+        </div>
+    );
+}
+
+export function PageLoadingState({ className }: { className?: string | undefined }) {
+    return (
+        <div
+            role="status"
+            aria-live="polite"
+            className={cn('flex items-center justify-center gap-2 px-6 py-12 text-muted-foreground', className)}
+        >
+            <Loader2Icon className="size-4 animate-spin" aria-hidden="true" />
+            <span className="text-sm">{LABELS.COMMON.LOADING}</span>
+        </div>
+    );
+}
+
+export function PageEmptyState({
+    title = LABELS.COMMON.EMPTY,
+    body,
+    action,
+    className,
+}: {
+    title?: string | undefined;
+    body?: string | undefined;
+    action?: ReactNode;
+    className?: string | undefined;
+}) {
+    return <StateShell icon={<InboxIcon className="size-8" />} title={title} body={body} action={action} className={className} />;
+}
+
+export function PageErrorState({
+    title = LABELS.COMMON.FETCH_ERROR,
+    body,
+    onRetry,
+    className,
+}: {
+    title?: string | undefined;
+    body?: string | undefined;
+    onRetry?: (() => void) | undefined;
+    className?: string | undefined;
+}) {
+    return (
+        <StateShell
+            icon={<AlertCircleIcon className="size-8" />}
+            title={title}
+            body={body}
+            className={className}
+            action={
+                onRetry ? (
+                    <Button variant="outline" size="sm" onClick={onRetry}>
+                        {LABELS.COMMON.RETRY}
+                    </Button>
+                ) : undefined
+            }
+        />
+    );
+}
+
+/**
+ * What a cross-tenant read looks like from the client.
+ *
+ * A request for a resource belonging to another organisation returns 404 — the
+ * row was filtered out by row-level security before the service's query saw it,
+ * so "not yours" and "does not exist" are genuinely the same answer here. The
+ * copy says so rather than implying the record exists somewhere out of reach.
+ */
+export function PageNotFoundState({
+    title = LABELS.ERRORS.NOT_FOUND_TITLE,
+    body,
+    action,
+    className,
+}: {
+    title?: string | undefined;
+    body?: string | undefined;
+    action?: ReactNode;
+    className?: string | undefined;
+}) {
+    return <StateShell icon={<SearchXIcon className="size-8" />} title={title} body={body} action={action} className={className} />;
+}

@@ -25,9 +25,11 @@ import { InvitationExpirySweepService } from './sweep/invitation-expiry-sweep.se
 import { HealthController } from './health.controller';
 
 /**
- * Guard order matches every other service (§13.2, §19.2): InternalContextGuard
- * first, then CaslAbilityGuard. ScheduleModule enables the §19.9 sweep's
- * @Cron decorator — the only background job in the system.
+ * Request lifecycle matches every other service (§13.2, §19.2) — see
+ * tenant-service's AppModule for the full breakdown: TenantContextMiddleware
+ * verifies + opens the ALS scope, then InternalContextGuard (defense in
+ * depth) and CaslAbilityGuard run against it. ScheduleModule enables the
+ * §19.9 sweep's @Cron decorator — the only background job in the system.
  */
 @Module({
   imports: [
