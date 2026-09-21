@@ -63,6 +63,12 @@ export class UsersController {
     });
   }
 
+  /** Pending invitations, for the Users page's merged view. */
+  @Get('invitations')
+  listInvitations(): Promise<unknown> {
+    return this.proxy.forward({ service: 'user', method: 'GET', path: '/invitations' });
+  }
+
   /**
    * Revoking a pending invitation. Distinct from /invitations/:token/accept, which
    * is public and lives in its own controller — this one takes an invitation ID and

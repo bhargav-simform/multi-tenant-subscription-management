@@ -1,5 +1,11 @@
 import { randomUUID, createHash } from 'node:crypto';
-import { GoneException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  GoneException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { TenantAwareDataSource } from '@app/database';
 import { TenantContextStore } from '@app/tenant-context';
 import { EventPublisher, type DomainEvent } from '@app/kafka';
@@ -10,6 +16,8 @@ import {
   INVITATION_REPOSITORY,
   type IInvitationRepository,
 } from '../invitations/invitation.repository.interface';
+import { InvitationAlreadyPendingError } from '../invitations/invitation-already-pending.error';
+import { AUTH_CLIENT, type IAuthClient } from '../invitations/clients/auth-client.interface';
 import {
   SUBSCRIPTION_SEAT_REPOSITORY,
   type ISubscriptionSeatRepository,
@@ -36,6 +44,7 @@ export class UsersService {
     @Inject(USER_REPOSITORY) private readonly users: IUserRepository,
     @Inject(INVITATION_REPOSITORY) private readonly invitations: IInvitationRepository,
     @Inject(SUBSCRIPTION_SEAT_REPOSITORY) private readonly seats: ISubscriptionSeatRepository,
+    @Inject(AUTH_CLIENT) private readonly authClient: IAuthClient,
   ) {}
 
   /**
@@ -74,10 +83,18 @@ export class UsersService {
         );
       }
 
-      const invitation = await this.invitations.create(
-        { email: dto.email, role: dto.role, tokenHash, expiresAt },
-        manager,
-      );
+      let invitation;
+      try {
+        invitation = await this.invitations.create(
+          { email: dto.email, role: dto.role, tokenHash, expiresAt },
+          manager,
+        );
+      } catch (err) {
+        if (err instanceof InvitationAlreadyPendingError) {
+          throw new ConflictException(err.message);
+        }
+        throw err;
+      }
       await this.seats.adjustUsedSeats(organizationId, 1, manager);
       return invitation.id;
     });
@@ -100,25 +117,93 @@ export class UsersService {
    * seat) between the expiry check and the user insert here, leaving a user
    * occupying a seat the counter no longer counts.
    *
-   * ONE transaction throughout (transactionWithDeferredScope, §15.3): the
-   * organisation is not known until the token resolves it, so the
-   * transaction begins unscoped, looks up the invitation by its token hash
-   * (a cryptographically random, single-use value — the token itself IS the
-   * authorization to read this one row, §11.5), THEN scopes the rest of the
-   * same transaction to that organisation before touching users or
-   * subscriptions. No gap between lookup and lock — a single lock, held for
-   * the transaction's full duration.
+   * ORG RESOLUTION BUG THIS METHOD USED TO HAVE: `users.invitations` has
+   * FORCE ROW LEVEL SECURITY, so a plain query against it with
+   * app.current_org unset — including the unscoped portion of
+   * transactionWithDeferredScope BEFORE setScope() runs — returns ZERO ROWS
+   * UNCONDITIONALLY, for every token, valid or not (confirmed empirically
+   * against a real Postgres container). findPendingByTokenHashForUpdate
+   * cannot be the thing that first discovers organizationId, because it is
+   * an ordinary RLS-scoped repository method. The fix mirrors
+   * findRoleByUserId's exact two-step shape (user.repository.ts): a
+   * SECURITY DEFINER function (migration 1700000000005,
+   * users.get_invitation_organization_id) returns ONLY organizationId for a
+   * token hash, unscoped; every subsequent query is then properly scoped to
+   * that value.
+   *
+   * Credential creation (§11.3: auth-service mints userId, matching the
+   * onboarding saga's pattern for the org's first admin) is a REMOTE HTTP
+   * call, made BEFORE the locking transaction opens — never inside it. Doing
+   * it inside would hold the subscription-row lock for the duration of a
+   * network call, exactly what §19.7 exists to avoid. This means a
+   * correctly-scoped PEEK first (transactionForOrganization, its lock
+   * released at that transaction's own commit) to fetch email/role and reject
+   * an early-expired token, THEN the credential call, THEN the real
+   * transactionWithDeferredScope that re-validates and re-locks as the actual
+   * source of truth.
+   *
+   * KNOWN GAP, same tradeoff class as §19.7's "Accepted for this POC": if the
+   * token is revoked or raced by a second acceptance between resolving
+   * organizationId and the locking transaction below, the transaction's
+   * findPendingByTokenHashForUpdate throws GoneException AFTER a working
+   * credential has already been minted in auth-service — that credential is
+   * then orphaned (no `users` row ever created for it). This codebase's
+   * established answer to "external call succeeded, later step failed" is
+   * forward-recovery via persisted saga state (onboarding.service.ts), never
+   * compensating deletes — there is no delete-credential path anywhere in the
+   * system. No saga exists here to resume from, so this one case has no
+   * forward-recovery story either; accepted as narrow and rare (requires a
+   * revoke/second-accept racing the exact same token in a sub-second window)
+   * rather than building unprecedented cleanup logic.
    */
   async acceptInvitation(tokenRaw: string, dto: AcceptInvitationDto): Promise<UserResponseDto> {
     const tokenHash = createHash('sha256').update(tokenRaw).digest('hex');
 
+    const organizationId = await this.tenantDataSource.runGlobal(async (manager) => {
+      const rows = await manager.query<{ get_invitation_organization_id: string | null }[]>(
+        'SELECT users.get_invitation_organization_id($1)',
+        [tokenHash],
+      );
+      return rows[0]?.get_invitation_organization_id ?? null;
+    });
+    if (!organizationId) {
+      throw new GoneException('This invitation has expired or already been used.');
+    }
+
+    // A first, correctly RLS-scoped (transactionForOrganization, using the
+    // organizationId just resolved) read of the invitation — locked, but the
+    // lock is released at THIS transaction's commit, before the credential
+    // call below. Resolves email/role and rejects an expired/spent token
+    // early; the SECOND, real transaction below re-validates under its own
+    // lock as the actual source of truth (never this peek).
+    const peeked = await this.tenantDataSource.transactionForOrganization(
+      organizationId,
+      (manager) => this.invitations.findPendingByTokenHashForUpdate(tokenHash, manager),
+    );
+    if (!peeked || peeked.expiresAt.getTime() <= Date.now()) {
+      throw new GoneException('This invitation has expired or already been used.');
+    }
+
+    const { userId } = await this.authClient.createCredentials({
+      organizationId,
+      email: peeked.email,
+      password: dto.password,
+    });
+
+    // ONE transaction throughout (transactionWithDeferredScope, §15.3):
+    // setScope() runs FIRST, using the SAME organizationId — every query
+    // after this point, including findPendingByTokenHashForUpdate, is
+    // RLS-scoped exactly as if transaction() had been used from the start.
+    // No gap between lookup and lock — a single lock, held for the
+    // transaction's full duration.
     const result = await this.tenantDataSource.transactionWithDeferredScope(
       async (manager, setScope) => {
-        // §19.8: the same repository method the expiry sweep's counterpart
-        // reasoning depends on — locked, and filtered to accepted_at/revoked_at
-        // IS NULL. Not tenant-scoped (cannot be — org is unknown until this
-        // resolves), which is why this call is unscoped by construction (§11.5:
-        // the token itself is the authorization to read this one row).
+        await setScope(organizationId);
+
+        // §19.8: filtered to accepted_at/revoked_at IS NULL and locked — the
+        // real validity check. The peek above only resolved email/role early
+        // to avoid holding this lock across the credential-creation network
+        // call; it is not itself the authorization decision.
         const invitation = await this.invitations.findPendingByTokenHashForUpdate(
           tokenHash,
           manager,
@@ -127,9 +212,6 @@ export class UsersService {
         if (!invitation || invitation.expiresAt.getTime() <= Date.now()) {
           throw new GoneException('This invitation has expired or already been used.');
         }
-
-        const organizationId = invitation.organizationId;
-        await setScope(organizationId);
 
         // §19.7: EVERY OTHER seat-changing path locks the subscription row
         // FIRST. This one cannot: the organisation — and therefore which
@@ -149,6 +231,7 @@ export class UsersService {
 
         const created = await this.users.create(
           {
+            id: userId,
             organizationId,
             email: invitation.email,
             firstName: dto.firstName,

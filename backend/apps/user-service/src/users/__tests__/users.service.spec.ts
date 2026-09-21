@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { jest, describe, it, expect, beforeEach } from '@jest/globals';
 import { Test } from '@nestjs/testing';
 import { GoneException, NotFoundException } from '@nestjs/common';
@@ -8,6 +9,7 @@ import { EVENT_TYPES, Role, LastAdminException } from '@app/common';
 import { UsersService } from '../users.service';
 import { USER_REPOSITORY } from '../user.repository.interface';
 import { INVITATION_REPOSITORY } from '../../invitations/invitation.repository.interface';
+import { AUTH_CLIENT } from '../../invitations/clients/auth-client.interface';
 import { SUBSCRIPTION_SEAT_REPOSITORY } from '../../subscriptions/subscription-seat.repository.interface';
 import { UserRole, UserStatus } from '../user.entity';
 import type { User } from '../user.entity';
@@ -42,6 +44,8 @@ describe('UsersService', () => {
    */
   class SerializingFakeDataSource {
     private queue: Promise<unknown> = Promise.resolve();
+    /** Fakes users.get_invitation_organization_id(token_hash) for runGlobal's manager.query. */
+    invitationOrgIdByTokenHash = new Map<string, string>();
 
     async transaction<T>(work: (manager: unknown) => Promise<T>): Promise<T> {
       const run = this.queue.then(() => work({}));
@@ -52,7 +56,15 @@ describe('UsersService', () => {
     }
 
     async runGlobal<T>(work: (manager: unknown) => Promise<T>): Promise<T> {
-      return work({});
+      const manager = {
+        query: async (_sql: string, params: unknown[]) => {
+          const tokenHash = params[0] as string;
+          return [
+            { get_invitation_organization_id: this.invitationOrgIdByTokenHash.get(tokenHash) ?? null },
+          ];
+        },
+      };
+      return work(manager);
     }
 
     async transactionForOrganization<T>(
@@ -156,6 +168,12 @@ describe('UsersService', () => {
       publish: jest.fn<(topic: string, event: unknown) => Promise<void>>().mockResolvedValue(undefined),
     };
 
+    const authClient = {
+      createCredentials: jest
+        .fn<(data: { organizationId: string; email: string; password: string }) => Promise<{ userId: string }>>()
+        .mockResolvedValue({ userId: 'minted-user-id' }),
+    };
+
     const moduleRef = await Test.createTestingModule({
       providers: [
         UsersService,
@@ -165,10 +183,11 @@ describe('UsersService', () => {
         { provide: USER_REPOSITORY, useValue: users },
         { provide: INVITATION_REPOSITORY, useValue: invitations },
         { provide: SUBSCRIPTION_SEAT_REPOSITORY, useValue: seatRepo },
+        { provide: AUTH_CLIENT, useValue: authClient },
       ],
     }).compile();
 
-    return { service: moduleRef.get(UsersService), tenantContext, users, invitations, publisher };
+    return { service: moduleRef.get(UsersService), tenantContext, users, invitations, publisher, authClient, dataSource };
   }
 
   it('transaction SHAPE (not a lock proof — see file header): two invites via the serialising fake, 1 seat free — exactly one succeeds', async () => {
@@ -280,8 +299,12 @@ describe('UsersService', () => {
     const seatRepo = new FakeSeatRepository();
     seatRepo.usedSeats = 1; // one seat already held by the pending invitation
     seatRepo.maxSeatsSnapshot = 5;
-    const { service, invitations, users, publisher } = await buildService(seatRepo);
+    const { service, invitations, users, publisher, authClient, dataSource } = await buildService(seatRepo);
 
+    dataSource.invitationOrgIdByTokenHash.set(
+      createHash('sha256').update('raw-token').digest('hex'),
+      ORG_ID,
+    );
     invitations.findPendingByTokenHashForUpdate.mockResolvedValue({
       id: 'invitation-1',
       organizationId: ORG_ID,
@@ -296,12 +319,19 @@ describe('UsersService', () => {
     const result = await service.acceptInvitation('raw-token', {
       firstName: 'New',
       lastName: 'Hire',
+      password: 'a-long-enough-password',
     });
 
     expect(result.email).toBe('invitee@acme.test');
+    // §11.3: auth-service mints the id; user-service's row must use the SAME one.
+    expect(authClient.createCredentials).toHaveBeenCalledWith({
+      organizationId: ORG_ID,
+      email: 'invitee@acme.test',
+      password: 'a-long-enough-password',
+    });
     expect(invitations.markAccepted).toHaveBeenCalledWith('invitation-1', expect.anything());
     expect(users.create).toHaveBeenCalledWith(
-      expect.objectContaining({ organizationId: ORG_ID, email: 'invitee@acme.test' }),
+      expect.objectContaining({ id: 'minted-user-id', organizationId: ORG_ID, email: 'invitee@acme.test' }),
       expect.anything(),
     );
     // The invariant this test exists to prove: used_seats is UNCHANGED.
@@ -323,13 +353,21 @@ describe('UsersService', () => {
     invitations.findPendingByTokenHashForUpdate.mockResolvedValue(null);
 
     await expect(
-      service.acceptInvitation('garbage-token', { firstName: 'A', lastName: 'B' }),
+      service.acceptInvitation('garbage-token', {
+        firstName: 'A',
+        lastName: 'B',
+        password: 'a-long-enough-password',
+      }),
     ).rejects.toBeInstanceOf(GoneException);
   });
 
   it('throws GoneException for an invitation whose token resolves but has expired', async () => {
     const seatRepo = new FakeSeatRepository();
-    const { service, invitations } = await buildService(seatRepo);
+    const { service, invitations, dataSource } = await buildService(seatRepo);
+    dataSource.invitationOrgIdByTokenHash.set(
+      createHash('sha256').update('raw-token').digest('hex'),
+      ORG_ID,
+    );
     invitations.findPendingByTokenHashForUpdate.mockResolvedValue({
       id: 'invitation-1',
       organizationId: ORG_ID,
@@ -342,7 +380,11 @@ describe('UsersService', () => {
     } as Invitation);
 
     await expect(
-      service.acceptInvitation('raw-token', { firstName: 'A', lastName: 'B' }),
+      service.acceptInvitation('raw-token', {
+        firstName: 'A',
+        lastName: 'B',
+        password: 'a-long-enough-password',
+      }),
     ).rejects.toBeInstanceOf(GoneException);
   });
 

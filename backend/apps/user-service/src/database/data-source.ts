@@ -3,6 +3,7 @@ import { CreateUsersAndInvitations1700000000001 } from './migrations/17000000000
 import { CreateConsumedEvents1700000000002 } from './migrations/1700000000002-CreateConsumedEvents';
 import { FixRlsPolicyNullifEmptyString1700000000003 } from './migrations/1700000000003-FixRlsPolicyNullifEmptyString';
 import { AddUserExistsFunction1700000000004 } from './migrations/1700000000004-AddUserExistsFunction';
+import { AddInvitationOrganizationIdFunction1700000000005 } from './migrations/1700000000005-AddInvitationOrganizationIdFunction';
 
 /**
  * §27.3 / §22.1 — see apps/tenant-service/src/database/data-source.ts for the
@@ -40,6 +41,7 @@ export default new DataSource({
     CreateConsumedEvents1700000000002,
     FixRlsPolicyNullifEmptyString1700000000003,
     AddUserExistsFunction1700000000004,
+    AddInvitationOrganizationIdFunction1700000000005,
   ],
   // The migrations ledger lives in THIS SERVICE'S OWN SCHEMA, not `public`.
   // Two reasons, the second discovered empirically:

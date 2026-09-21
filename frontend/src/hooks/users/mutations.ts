@@ -63,7 +63,10 @@ export const useRevokeInvitation = () => {
     const invalidate = useSeatAffectingInvalidation();
     return useMutation({
         mutationFn: (invitationId: string) => usersApi.revokeInvitation(invitationId),
-        onSuccess: () => invalidate(),
+        onSuccess: () => {
+            invalidate();
+            toast.success(LABELS.USERS.REVOKED);
+        },
         onError: (error) => showMutationError(error),
     });
 };

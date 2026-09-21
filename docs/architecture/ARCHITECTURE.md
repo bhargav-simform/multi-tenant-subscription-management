@@ -2067,7 +2067,7 @@ INTERNAL_SIGNING_SECRET=dev-only-replace-me-differently
 INTERNAL_CONTEXT_TTL_SECONDS=30
 
 # ─ Security ──────────────────────────────────────────────
-CORS_ORIGINS=http://localhost:5173
+CORS_ORIGINS=http://localhost:5178
 THROTTLE_TTL=60
 THROTTLE_LIMIT=100
 THROTTLE_AUTH_LIMIT=5           # stricter on /auth/login and /onboarding/signup
@@ -2385,7 +2385,7 @@ why structured logging was chosen over ad-hoc strings.
 | `subscription-service` | local build | internal | |
 | `resource-service` | local build | internal | |
 | `audit-service` | local build | internal | |
-| `frontend` | local build | **5173 → host** | SPA |
+| `frontend` | local build | **5178 → host** | SPA |
 
 **Eleven containers, two published ports.** Every backend service except the gateway is unreachable
 from the host — which is §10.5's network layer, expressed in configuration rather than in prose.

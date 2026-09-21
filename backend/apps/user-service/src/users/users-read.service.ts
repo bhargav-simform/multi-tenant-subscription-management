@@ -5,8 +5,14 @@ import { EventPublisher } from '@app/kafka';
 import { EVENT_TYPES, KAFKA_TOPICS } from '@app/common';
 import type { CursorPage, CursorQuery } from '@app/common';
 import { USER_REPOSITORY, type IUserRepository } from './user.repository.interface';
+import {
+  INVITATION_REPOSITORY,
+  type IInvitationRepository,
+} from '../invitations/invitation.repository.interface';
 import type { UserResponseDto } from './dto/user-response.dto';
+import type { InvitationResponseDto } from '../invitations/dto/invitation-response.dto';
 import type { User } from './user.entity';
+import type { Invitation } from '../invitations/invitation.entity';
 
 /**
  * Read paths split from UsersService (which owns the seat-limit mutations,
@@ -31,6 +37,7 @@ export class UsersReadService {
     private readonly tenantContext: TenantContextStore,
     private readonly publisher: EventPublisher,
     @Inject(USER_REPOSITORY) private readonly users: IUserRepository,
+    @Inject(INVITATION_REPOSITORY) private readonly invitations: IInvitationRepository,
   ) {}
 
   async listPage(query: CursorQuery): Promise<CursorPage<UserResponseDto>> {
@@ -38,6 +45,18 @@ export class UsersReadService {
       this.users.listPage(query, manager),
     );
     return { ...page, items: page.items.map(toDto) };
+  }
+
+  /**
+   * Unpaginated: the pending-invitation count is capped by the org's seat
+   * limit (§19.2), never large enough to need keyset pagination like listPage.
+   */
+  async listPendingInvitations(): Promise<InvitationResponseDto[]> {
+    const ctx = this.tenantContext.getOrThrow();
+    const invitations = await this.tenantDataSource.transaction((manager) =>
+      this.invitations.listPending(ctx.organizationId!, manager),
+    );
+    return invitations.map((invitation) => toInvitationDto(invitation));
   }
 
   /**
@@ -151,5 +170,15 @@ function toDto(user: User): UserResponseDto {
     lastName: user.lastName,
     role: user.role,
     status: user.status,
+  };
+}
+
+function toInvitationDto(invitation: Invitation): InvitationResponseDto {
+  return {
+    id: invitation.id,
+    email: invitation.email,
+    role: invitation.role,
+    expiresAt: invitation.expiresAt,
+    createdAt: invitation.createdAt,
   };
 }

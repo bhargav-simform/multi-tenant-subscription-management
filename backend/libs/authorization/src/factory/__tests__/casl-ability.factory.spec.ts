@@ -99,10 +99,49 @@ describe('CaslAbilityFactory', () => {
     });
 
     it('cannot manage users at all', () => {
+      const user = { __caslSubjectType__: Subject.USER as const, id: USER_ID, organizationId: ORG_ID };
+      expect(ability.can(Action.MANAGE, user)).toBe(false);
+      expect(ability.can(Action.CREATE, user)).toBe(false);
+      expect(ability.can(Action.UPDATE, user)).toBe(false);
+      expect(ability.can(Action.DELETE, user)).toBe(false);
+    });
+
+    it('can read any user in their own organisation, not just themselves — the Users page and Dashboard show every teammate', () => {
       expect(
-        ability.can(Action.MANAGE, {
+        ability.can(Action.READ, {
           __caslSubjectType__: Subject.USER,
-          id: USER_ID,
+          id: 'someone-else',
+          organizationId: ORG_ID,
+        }),
+      ).toBe(true);
+      expect(
+        ability.can(Action.READ, {
+          __caslSubjectType__: Subject.USER,
+          id: 'someone-else',
+          organizationId: OTHER_ORG_ID,
+        }),
+      ).toBe(false);
+    });
+
+    it('can read their own organisation\'s subscription — the Dashboard shows plan/seat/storage to every member, not just admins', () => {
+      expect(
+        ability.can(Action.READ, {
+          __caslSubjectType__: Subject.SUBSCRIPTION,
+          organizationId: ORG_ID,
+        }),
+      ).toBe(true);
+      expect(
+        ability.can(Action.READ, {
+          __caslSubjectType__: Subject.SUBSCRIPTION,
+          organizationId: OTHER_ORG_ID,
+        }),
+      ).toBe(false);
+    });
+
+    it('cannot update the subscription — only org_admin changes plans', () => {
+      expect(
+        ability.can(Action.UPDATE, {
+          __caslSubjectType__: Subject.SUBSCRIPTION,
           organizationId: ORG_ID,
         }),
       ).toBe(false);

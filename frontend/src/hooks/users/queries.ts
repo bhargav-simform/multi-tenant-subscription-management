@@ -27,3 +27,11 @@ export const useUser = (id: string | undefined) =>
         retry: false,
         meta: { [QUERY_META.SUPPRESS_ERROR_TOAST]: true },
     });
+
+/** Pending invitations for the Users page's merged view — small and unpaginated (capped by the seat limit). */
+export const usePendingInvitations = () =>
+    useQuery({
+        queryKey: QUERY_KEYS.USERS.INVITATIONS,
+        queryFn: () => usersApi.listInvitations(),
+        staleTime: STALE_TIME.ONE_MINUTE,
+    });

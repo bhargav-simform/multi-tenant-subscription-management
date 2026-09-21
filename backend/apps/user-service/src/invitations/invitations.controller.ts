@@ -1,13 +1,25 @@
-import { Body, Controller, Delete, Param, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post } from '@nestjs/common';
 import { Action, Subject } from '@app/common';
 import { CheckAbility } from '@app/authorization';
 import { UsersService } from '../users/users.service';
+import { UsersReadService } from '../users/users-read.service';
 import { AcceptInvitationDto } from './dto/accept-invitation.dto';
 import type { UserResponseDto } from '../users/dto/user-response.dto';
+import type { InvitationResponseDto } from './dto/invitation-response.dto';
 
 @Controller('invitations')
 export class InvitationsController {
-  constructor(private readonly users: UsersService) {}
+  constructor(
+    private readonly users: UsersService,
+    private readonly usersRead: UsersReadService,
+  ) {}
+
+  /** Pending invitations for the Users page's merged view (§19.4's seat-holders, minus the actual users). */
+  @Get()
+  @CheckAbility(Action.READ, Subject.USER)
+  list(): Promise<InvitationResponseDto[]> {
+    return this.usersRead.listPendingInvitations();
+  }
 
   /**
    * §11.5: this is ONE of exactly three routes the CLIENT reaches with no

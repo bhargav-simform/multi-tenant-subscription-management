@@ -3,7 +3,7 @@
 #
 # §27.1's eleven containers and two published ports, now both true: `frontend`
 # is a built static bundle (frontend/Dockerfile), not the bare Vite scaffold
-# the earlier note here described, and it has its own 5173 → host mapping.
+# the earlier note here described, and it has its own 5178 → host mapping.
 #
 # §10.5 layer 1, expressed as configuration rather than prose: exactly TWO
 # `ports:` mappings appear in this file — api-gateway (the only backend entry
@@ -377,7 +377,7 @@ services:
   # api-gateway's HOST-published address (127.0.0.1:3000/api/v1) because the
   # code that reads it runs in the browser, outside every Docker network this
   # compose file defines — the same reason api-gateway's CORS_ORIGINS default
-  # is this container's own host-published origin, http://localhost:5173.
+  # is this container's own host-published origin, http://localhost:5178.
   frontend:
     restart: unless-stopped
     build:
@@ -386,10 +386,10 @@ services:
       args:
         VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:3000/api/v1}
     ports:
-      - '127.0.0.1:5173:5173'
+      - '127.0.0.1:5178:5178'
     healthcheck:
       <<: *service-healthcheck
-      test: ['CMD', 'curl', '-fsS', 'http://localhost:5173/']
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:5178/']
     depends_on:
       # Purely so `docker compose up` brings up something useful in one shot —
       # like api-gateway's own downstream depends_on, this is NOT a health gate.

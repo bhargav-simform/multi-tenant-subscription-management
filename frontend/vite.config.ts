@@ -12,7 +12,7 @@ export default defineConfig({
         alias: { '@': path.resolve(__dirname, './src') },
     },
     server: {
-        port: 5173,
+        port: 5178,
         // Dev proxy so the browser talks same-origin and no CORS config is needed on the
         // gateway. In Docker the SPA is served behind the same origin as the API.
         proxy: {

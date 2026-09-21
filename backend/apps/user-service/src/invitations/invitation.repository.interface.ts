@@ -7,6 +7,8 @@ export const INVITATION_REPOSITORY = Symbol('INVITATION_REPOSITORY');
 export interface IInvitationRepository {
   /** §19.2: counted toward used_seats — pending AND unexpired AND unrevoked. */
   countPending(organizationId: string, manager: EntityManager): Promise<number>;
+  /** Pending (unaccepted, unrevoked, unexpired) invitations for the org's Users list. */
+  listPending(organizationId: string, manager: EntityManager): Promise<Invitation[]>;
   create(
     data: { email: string; role: UserRole; tokenHash: string; expiresAt: Date },
     manager: EntityManager,

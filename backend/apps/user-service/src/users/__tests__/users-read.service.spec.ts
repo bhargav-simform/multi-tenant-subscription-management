@@ -7,6 +7,7 @@ import { EventPublisher } from '@app/kafka';
 import { EVENT_TYPES, KAFKA_TOPICS, Role } from '@app/common';
 import { UsersReadService } from '../users-read.service';
 import { USER_REPOSITORY } from '../user.repository.interface';
+import { INVITATION_REPOSITORY } from '../../invitations/invitation.repository.interface';
 import { UserRole, UserStatus, type User } from '../user.entity';
 
 const ORG_ID = '11111111-1111-1111-1111-111111111111';
@@ -88,6 +89,18 @@ describe('UsersReadService — cross-tenant attempt detection (§13.9)', () => {
         .mockResolvedValue(undefined),
     };
 
+    const invitations = {
+      countPending: jest.fn<() => Promise<number>>().mockResolvedValue(0),
+      listPending: jest.fn<() => Promise<unknown[]>>().mockResolvedValue([]),
+      create: jest.fn<() => Promise<unknown>>(),
+      findPendingByTokenHashForUpdate: jest.fn<() => Promise<null>>().mockResolvedValue(null),
+      markAccepted: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
+      findById: jest.fn<() => Promise<null>>().mockResolvedValue(null),
+      markRevoked: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
+      findExpiredIds: jest.fn<() => Promise<string[]>>().mockResolvedValue([]),
+      markManyExpired: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
+    };
+
     const moduleRef = await Test.createTestingModule({
       providers: [
         UsersReadService,
@@ -95,6 +108,7 @@ describe('UsersReadService — cross-tenant attempt detection (§13.9)', () => {
         { provide: TenantContextStore, useValue: tenantContext },
         { provide: EventPublisher, useValue: publisher },
         { provide: USER_REPOSITORY, useValue: users },
+        { provide: INVITATION_REPOSITORY, useValue: invitations },
       ],
     }).compile();
 

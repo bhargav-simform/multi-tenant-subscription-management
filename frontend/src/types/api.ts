@@ -69,6 +69,15 @@ export interface InviteUserRequest {
     role: string;
 }
 
+/** A pending invitation, shown in the Users table alongside registered users with an "Invited" status. */
+export interface Invitation {
+    id: string;
+    email: string;
+    role: string;
+    expiresAt: string;
+    createdAt: string;
+}
+
 export interface InviteUserResponse {
     invitationId: string;
     /** Development convenience — the raw token, so an invite can be walked through without a mail server. */
@@ -78,6 +87,7 @@ export interface InviteUserResponse {
 export interface AcceptInvitationRequest {
     firstName: string;
     lastName: string;
+    password: string;
 }
 
 export interface UpdateRoleRequest {

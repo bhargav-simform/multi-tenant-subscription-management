@@ -21,6 +21,7 @@ export const QUERY_KEYS = {
         ALL: ['users'] as const,
         LIST: (cursor?: string, limit?: number) => ['users', 'list', { cursor, limit }] as const,
         DETAIL: (id: string) => ['users', 'detail', id] as const,
+        INVITATIONS: ['users', 'invitations'] as const,
     },
     RESOURCES: {
         ALL: ['resources'] as const,

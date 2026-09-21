@@ -30,7 +30,7 @@ async function bootstrap(): Promise<void> {
    * standard way this control is accidentally disabled.
    */
   const origins = config
-    .get<string>('CORS_ORIGINS', 'http://localhost:5173')
+    .get<string>('CORS_ORIGINS', 'http://localhost:5178')
     .split(',')
     .map((o) => o.trim())
     .filter((o) => o.length > 0);

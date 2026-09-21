@@ -1,10 +1,14 @@
 import { Injectable } from '@nestjs/common';
-import { EntityManager, IsNull, LessThanOrEqual, MoreThan, In } from 'typeorm';
+import { EntityManager, IsNull, LessThanOrEqual, MoreThan, In, QueryFailedError } from 'typeorm';
 import { TenantContextStore } from '@app/tenant-context';
 import { TenantRepository } from '@app/database';
 import { Invitation } from './invitation.entity';
 import type { UserRole } from '../users/user.entity';
 import type { IInvitationRepository } from './invitation.repository.interface';
+import { InvitationAlreadyPendingError } from './invitation-already-pending.error';
+
+/** PostgreSQL's error code for a unique_violation. */
+const PG_UNIQUE_VIOLATION = '23505';
 
 /**
  * §32.4: every method takes a REQUIRED `manager` from a
@@ -43,13 +47,39 @@ export class InvitationRepository
     });
   }
 
+  /**
+   * No findPendingByEmail() check-then-write here — that shape is a TOCTOU
+   * race under concurrent invites for the same email. The partial unique
+   * index `uq_invitations_org_email_pending` is the real guarantee; a
+   * violation is caught and translated to a typed error the caller can
+   * distinguish from any other database failure.
+   */
   async create(
     data: { email: string; role: UserRole; tokenHash: string; expiresAt: Date },
     manager: EntityManager,
   ): Promise<Invitation> {
     const repo = manager.getRepository(Invitation);
     const invitation = repo.create({ ...data, organizationId: this.organizationId });
-    return repo.save(invitation);
+    try {
+      return await repo.save(invitation);
+    } catch (err) {
+      if (isUniqueViolation(err)) {
+        throw new InvitationAlreadyPendingError(data.email);
+      }
+      throw err;
+    }
+  }
+
+  async listPending(organizationId: string, manager: EntityManager): Promise<Invitation[]> {
+    return manager.getRepository(Invitation).find({
+      where: {
+        organizationId,
+        acceptedAt: IsNull(),
+        revokedAt: IsNull(),
+        expiresAt: MoreThan(new Date()),
+      },
+      order: { createdAt: 'DESC' },
+    });
   }
 
   async findPendingByTokenHashForUpdate(
@@ -103,4 +133,11 @@ export class InvitationRepository
     // published event (InvitationExpired) is what records WHICH happened.
     await manager.getRepository(Invitation).update({ id: In(ids) }, { revokedAt: new Date() });
   }
+}
+
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    err instanceof QueryFailedError &&
+    (err as QueryFailedError & { code?: string }).code === PG_UNIQUE_VIOLATION
+  );
 }

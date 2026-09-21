@@ -3,6 +3,7 @@ import api from '@/services/api';
 import type {
     CursorPage,
     CursorQuery,
+    Invitation,
     InviteUserRequest,
     InviteUserResponse,
     UpdateRoleRequest,
@@ -45,5 +46,10 @@ export const usersApi = {
 
     revokeInvitation: async (invitationId: string): Promise<void> => {
         await api.delete(ENDPOINTS.INVITATIONS.REVOKE(invitationId));
+    },
+
+    listInvitations: async (): Promise<Invitation[]> => {
+        const { data } = await api.get<Invitation[]>(ENDPOINTS.INVITATIONS.LIST);
+        return data;
     },
 };

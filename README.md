@@ -3,13 +3,12 @@
 A POC demonstrating **structural tenant isolation**, enforced plan limits under real concurrency,
 and self-service organisation onboarding.
 
-> **Status: backend complete (7 services, 170 unit + 62 integration tests). Docker infrastructure
-> complete — the full stack has been brought up and a real end-to-end signup verified against it.
-> Two pre-existing DI defects in `libs/database` and `libs/kafka` currently stop the six
-> database-owning services from booting; see "Known blocker" below. Frontend is a built React SPA
-> (login/signup, dashboard, resources incl. the H1 cross-tenant detail view, user management, plan
-> & usage, audit log, and a structurally separate platform-admin shell) with its own Dockerfile,
-> now wired into `docker-compose.yml` as the eleventh container.**
+> **Status: full stack verified end to end.** Backend: 7 services, 196 unit tests passing. Docker
+> infrastructure complete — `docker compose up` brings up all eleven containers healthy, and a real
+> signup → invite → accept → login flow has been exercised against the running stack. Frontend is a
+> built React SPA (login/signup, dashboard, resources incl. the H1 cross-tenant detail view, user
+> management, plan & usage, audit log, and a structurally separate platform-admin shell) with its
+> own Dockerfile, wired into `docker-compose.yml` as the eleventh container.
 
 ## The problem
 
@@ -30,6 +29,8 @@ a spreadsheet nobody enforces, and onboarding a new client means an engineer cre
 |---|---|
 | [Architecture](docs/architecture/ARCHITECTURE.md) | The full technical design — 32 sections. **Start here** |
 | [POC Brief](docs/architecture/POC-BRIEF.md) | The source requirements |
+| [backend/README.md](backend/README.md) | Backend-only setup, per-service commands, migrations, testing |
+| [frontend/README.md](frontend/README.md) | Frontend-only setup, dev server, build, testing |
 
 Sections worth reading first: **§13 Tenant Isolation** and **§19 Concurrency** — the rest of the
 architecture is subordinate to those two.
@@ -58,27 +59,44 @@ docs/        architecture + brief
 
 ## Getting started
 
+The whole stack, the intended way to run this project — one command, no manual setup beyond the
+`.env` file:
+
 ```bash
 cp .env.example .env     # edit the secrets — see the notes in the file
 docker compose up
 ```
 
-No manual setup beyond the documented `.env` — that is a requirement of the POC, not an
-aspiration. There is no separate migration step and no seeding step: a one-shot `migrator`
-container runs every service's migrations as `app_migrator`, seeds the platform admin, and exits
-before any application service starts (`depends_on: condition: service_completed_successfully`).
+There is no separate migration step and no seeding step: a one-shot `migrator` container runs
+every service's migrations as `app_migrator`, seeds the platform admin, and exits before any
+application service starts (`depends_on: condition: service_completed_successfully`).
 
 Eleven containers, **two published ports**, matching §27.1: `api-gateway` on
-<http://localhost:3000> and `frontend` on <http://localhost:5173>. Postgres, Redis, Kafka and the
+<http://localhost:3000> and `frontend` on <http://localhost:5178>. Postgres, Redis, Kafka and the
 six non-gateway backend services are on an internal bridge network with no port mapping at all —
 §10.5 layer 1, expressed as configuration. `frontend` isn't on that internal network at all: its
 compiled JS runs in the browser and calls `api-gateway`'s host-published port directly, so it has
 no need for a container-to-container path to any backend service.
 
-Note the backend's "Known blocker" below still applies: with the six database-owning services
-failing to boot, the frontend's own container comes up and serves the SPA correctly, but most
-screens will show a failed request until that DI defect is fixed — `docker compose up` bringing
-up the frontend container is not the same claim as the full stack answering requests end to end.
+### Root-level commands
+
+Everything below runs from the repository root, against the full stack. For commands scoped to
+just one half of the codebase (per-service backend commands, or the frontend dev server), see
+[backend/README.md](backend/README.md) and [frontend/README.md](frontend/README.md).
+
+```bash
+docker compose up                    # build (if needed) and start every container
+docker compose up -d                 # same, detached
+docker compose up -d --build <name>  # rebuild and restart one container after a code change
+docker compose ps                    # status + health of every container
+docker compose logs -f <name>        # tail one service's logs
+docker compose down                  # stop and remove all containers (keeps the postgres volume)
+docker compose down -v               # same, and also drop the postgres volume (fresh DB next run)
+```
+
+`<name>` is any service from `docker-compose.yml`: `postgres`, `redis`, `kafka`, `migrator`,
+`api-gateway`, `auth-service`, `tenant-service`, `user-service`, `subscription-service`,
+`resource-service`, `audit-service`, `frontend`.
 
 ### Seed data
 
@@ -88,24 +106,6 @@ up the frontend container is not the same claim as the full stack answering requ
 - **One platform admin** — a `credentials` row with `organization_id` NULL, which is the single
   column that makes `AuthService.resolveRoles` return `PLATFORM_ADMIN`. Seeded from
   `PLATFORM_ADMIN_EMAIL` / `PLATFORM_ADMIN_PASSWORD`; leave the password empty to skip it.
-
-### Running migrations outside Docker
-
-Each database-owning service has a CLI `DataSource` at `src/database/data-source.ts` and its own
-scripts. These connect as `app_migrator` (DDL rights), never as the runtime `app_user`:
-
-```bash
-cd backend && pnpm --filter user-service migration:run    # also :revert, :show
-```
-
-user-service's core_db migrations must run **before** subscription-service's — the latter `ALTER`s
-a table the former creates (§32.3). `docker/migrator/run-migrations.sh` encodes that ordering.
-
-> **Known blocker (not yet fixed):** the six database-owning services currently crash on boot with
-> `UnknownDependenciesException` from two pre-existing DI defects in `libs/database` and
-> `libs/kafka`. `api-gateway` is unaffected. See the note at the top of
-> `docker/migrator/run-migrations.sh` and the project handover for the diagnosis — the
-> infrastructure in this section is verified working once those two library modules are corrected.
 
 ## Conventions
 

@@ -75,9 +75,20 @@ export class CaslAbilityFactory {
       can(Action.CREATE, Subject.RESOURCE);
       can(Action.UPDATE, Subject.RESOURCE, { organizationId, createdBy: userId });
       can(Action.DELETE, Subject.RESOURCE, { organizationId, createdBy: userId });
-      can(Action.READ, Subject.USER, { id: userId });
+      // Org-wide, not self-only — the Users page and the Dashboard's
+      // "recent users" card both show every teammate's name/email/role/status
+      // to every member, not just their own row.
+      can(Action.READ, Subject.USER, { organizationId });
       can(Action.READ, Subject.ORGANIZATION, { id: organizationId });
-      cannot(Action.MANAGE, Subject.USER);
+      can(Action.READ, Subject.SUBSCRIPTION, { organizationId });
+      // NOT cannot(MANAGE, USER) — CASL's MANAGE is a wildcard covering every
+      // action including READ, so that blanket rule would revoke the READ
+      // grant just added above regardless of rule order. Naming the three
+      // mutating actions explicitly keeps edit/remove/invite admin-only
+      // without touching READ.
+      cannot(Action.CREATE, Subject.USER);
+      cannot(Action.UPDATE, Subject.USER);
+      cannot(Action.DELETE, Subject.USER);
     }
 
     return build();

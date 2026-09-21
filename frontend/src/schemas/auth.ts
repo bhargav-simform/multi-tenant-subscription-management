@@ -38,10 +38,14 @@ export const signupSchema = z.object({
 
 export type SignupFormValues = z.infer<typeof signupSchema>;
 
-/** user-service AcceptInvitationDto: @IsString @MinLength(1) on both names. */
+/** user-service AcceptInvitationDto: @IsString @MinLength(1) on both names, @MinLength(12) on password. */
 export const acceptInvitationSchema = z.object({
     firstName: z.string().trim().min(1, 'Enter your first name.'),
     lastName: z.string().trim().min(1, 'Enter your last name.'),
+    password: z
+        .string()
+        .min(12, LABELS.SIGNUP.PASSWORD_HINT)
+        .max(255, 'Password is too long.'),
 });
 
 export type AcceptInvitationFormValues = z.infer<typeof acceptInvitationSchema>;

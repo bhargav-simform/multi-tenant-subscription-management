@@ -21,6 +21,8 @@ export const ENDPOINTS = {
     INVITATIONS: {
         /** Public — the invitation token IS the credential. */
         ACCEPT: (token: string) => `/invitations/${encodeURIComponent(token)}/accept`,
+        /** Pending invitations for the caller's org, for the Users page's merged view. */
+        LIST: '/invitations',
         /** Authenticated org admin revoking a pending invite, by invitation id. */
         REVOKE: (id: string) => `/invitations/${encodeURIComponent(id)}`,
     },

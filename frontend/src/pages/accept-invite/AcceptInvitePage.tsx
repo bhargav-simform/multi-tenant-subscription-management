@@ -5,7 +5,7 @@ import { toast } from 'sonner';
 
 import { AuthShell } from '@/pages/login/AuthShell';
 import { Button } from '@/components/ui/button';
-import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
+import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
 import { LABELS } from '@/constants/labels';
 import { ROUTES } from '@/constants/routes';
@@ -29,7 +29,7 @@ export default function AcceptInvitePage() {
 
     const form = useForm<AcceptInvitationFormValues>({
         resolver: zodResolver(acceptInvitationSchema),
-        defaultValues: { firstName: '', lastName: '' },
+        defaultValues: { firstName: '', lastName: '', password: '' },
     });
 
     const onSubmit = async (values: AcceptInvitationFormValues) => {
@@ -83,6 +83,20 @@ export default function AcceptInvitePage() {
                                 <FormControl>
                                     <Input autoComplete="family-name" {...field} />
                                 </FormControl>
+                                <FormMessage />
+                            </FormItem>
+                        )}
+                    />
+                    <FormField
+                        control={form.control}
+                        name="password"
+                        render={({ field }) => (
+                            <FormItem>
+                                <FormLabel required>{LABELS.INVITE_ACCEPT.PASSWORD}</FormLabel>
+                                <FormControl>
+                                    <Input type="password" autoComplete="new-password" {...field} />
+                                </FormControl>
+                                <FormDescription>{LABELS.SIGNUP.PASSWORD_HINT}</FormDescription>
                                 <FormMessage />
                             </FormItem>
                         )}
