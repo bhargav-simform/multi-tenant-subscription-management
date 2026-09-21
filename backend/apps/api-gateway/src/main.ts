@@ -28,9 +28,14 @@ async function bootstrap(): Promise<void> {
    * §10.2: CORS allowlist from CORS_ORIGINS, comma-separated. An allowlist, never
    * `origin: true` — reflecting an arbitrary origin with credentials: true is the
    * standard way this control is accidentally disabled.
+   *
+   * getOrThrow, not a fallback: a fallback here would default to a frontend DEV
+   * origin baked into gateway code, silently narrowing the allowlist to
+   * localhost in any environment that forgot to set this — a misconfiguration
+   * that should fail loudly at boot, not degrade quietly.
    */
   const origins = config
-    .get<string>('CORS_ORIGINS', 'http://localhost:5178')
+    .getOrThrow<string>('CORS_ORIGINS')
     .split(',')
     .map((o) => o.trim())
     .filter((o) => o.length > 0);
@@ -57,7 +62,10 @@ async function bootstrap(): Promise<void> {
   // §8.1/§10.2: the entire public API surface lives under one versioned prefix.
   app.setGlobalPrefix('api/v1');
 
-  const port = config.get<string>('PORT', '3000');
+  // PORT is deliberately not in .env — it's set per-service in
+  // docker-compose.yml's `environment:` block (root README's "Root-level
+  // commands" note). A local, non-Docker run exports it explicitly.
+  const port = config.getOrThrow<string>('PORT');
   await app.listen(port);
 }
 

@@ -84,8 +84,8 @@ import { isStrictThrottlePath, isUnthrottledPath } from './common/throttle-route
         throttlers: [
           {
             name: 'default',
-            ttl: Number(config.get('THROTTLE_TTL_MS', '60000')),
-            limit: Number(config.get('THROTTLE_LIMIT', '100')),
+            ttl: Number(config.getOrThrow('THROTTLE_TTL_MS')),
+            limit: Number(config.getOrThrow('THROTTLE_LIMIT')),
             skipIf: (context: ExecutionContext) => {
               const url = context.switchToHttp().getRequest<Request>().originalUrl;
               return isStrictThrottlePath(url) || isUnthrottledPath(url);
@@ -93,8 +93,8 @@ import { isStrictThrottlePath, isUnthrottledPath } from './common/throttle-route
           },
           {
             name: 'strict',
-            ttl: Number(config.get('THROTTLE_STRICT_TTL_MS', '60000')),
-            limit: Number(config.get('THROTTLE_STRICT_LIMIT', '10')),
+            ttl: Number(config.getOrThrow('THROTTLE_STRICT_TTL_MS')),
+            limit: Number(config.getOrThrow('THROTTLE_STRICT_LIMIT')),
             skipIf: (context: ExecutionContext) =>
               !isStrictThrottlePath(context.switchToHttp().getRequest<Request>().originalUrl),
           },
@@ -106,7 +106,7 @@ import { isStrictThrottlePath, isUnthrottledPath } from './common/throttle-route
     HttpModule.registerAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
-        timeout: Number(config.get('DOWNSTREAM_TIMEOUT_MS', '10000')),
+        timeout: Number(config.getOrThrow('DOWNSTREAM_TIMEOUT_MS')),
         // Never follow a downstream redirect or throw on a 4xx before ProxyService
         // can normalise it — validateStatus stays default so axios throws and
         // ProxyService passes the real status through (§10.3).

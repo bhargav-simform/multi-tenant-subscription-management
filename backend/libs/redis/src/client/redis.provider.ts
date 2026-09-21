@@ -10,7 +10,7 @@ export const redisProvider: Provider = {
   useFactory: (config: ConfigService) =>
     new Redis({
       host: config.getOrThrow<string>('REDIS_HOST'),
-      port: Number(config.get('REDIS_PORT', '6379')),
+      port: Number(config.getOrThrow('REDIS_PORT')),
       // §16.4: rate limiting must fail OPEN, denylist must fail CLOSED. Neither
       // behaviour lives here — it lives in each consumer's error handling, this
       // client just avoids crashing the process on a transient Redis blip.

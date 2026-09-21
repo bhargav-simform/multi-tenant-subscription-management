@@ -19,16 +19,17 @@ export class DownstreamConfig {
   private readonly baseUrls: Record<DownstreamService, string>;
 
   constructor(config: ConfigService) {
+    // getOrThrow, not a fallback: a hardcoded default here would silently mask
+    // a missing *_SERVICE_URL in any environment where docker-compose's
+    // container-name-based defaults don't apply (e.g. Kubernetes), routing
+    // requests to a hostname that was never actually configured.
     this.baseUrls = {
-      auth: config.get<string>('AUTH_SERVICE_URL', 'http://auth-service:3002'),
-      tenant: config.get<string>('TENANT_SERVICE_URL', 'http://tenant-service:3001'),
-      user: config.get<string>('USER_SERVICE_URL', 'http://user-service:3003'),
-      subscription: config.get<string>(
-        'SUBSCRIPTION_SERVICE_URL',
-        'http://subscription-service:3004',
-      ),
-      resource: config.get<string>('RESOURCE_SERVICE_URL', 'http://resource-service:3005'),
-      audit: config.get<string>('AUDIT_SERVICE_URL', 'http://audit-service:3006'),
+      auth: config.getOrThrow<string>('AUTH_SERVICE_URL'),
+      tenant: config.getOrThrow<string>('TENANT_SERVICE_URL'),
+      user: config.getOrThrow<string>('USER_SERVICE_URL'),
+      subscription: config.getOrThrow<string>('SUBSCRIPTION_SERVICE_URL'),
+      resource: config.getOrThrow<string>('RESOURCE_SERVICE_URL'),
+      audit: config.getOrThrow<string>('AUDIT_SERVICE_URL'),
     };
   }
 
