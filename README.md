@@ -160,7 +160,12 @@ docker compose up -d audit-service auth-service resource-service subscription-se
   can ever be satisfied.
 - **One platform admin** — a `credentials` row with `organization_id` NULL, which is the single
   column that makes `AuthService.resolveRoles` return `PLATFORM_ADMIN`. Seeded from
-  `PLATFORM_ADMIN_EMAIL` / `PLATFORM_ADMIN_PASSWORD`; leave the password empty to skip it.
+  `PLATFORM_ADMIN_EMAIL` / `PLATFORM_ADMIN_PASSWORD` (defaults to `admin@platform.local` in
+  `.env.example` — set your own password in `.env` before first `docker compose up`, or leave the
+  password empty to skip the seed entirely). Log in with it at `/login` like any other account,
+  then visit `/admin/organizations` — the platform-admin shell is a structurally separate part of
+  the SPA with no access to any organization's actual users or resources (§12.3), only
+  organization/plan/usage metadata and the cross-tenant security event log at `/admin/security`.
 
 ## Environment variables
 
