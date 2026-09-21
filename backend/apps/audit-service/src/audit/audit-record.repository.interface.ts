@@ -1,8 +1,9 @@
 import type { EntityManager } from 'typeorm';
-import type { CursorPage, CursorQuery } from '@app/common';
+import type { CursorPage } from '@app/common';
 import type { AuditSeverity } from './audit-severity.enum';
 import type { AuditEvent } from './audit-event.entity';
 import type { SecurityEvent } from './security-event.entity';
+import type { ListAuditQueryDto } from './dto/list-audit-query.dto';
 
 export const AUDIT_EVENT_REPOSITORY = Symbol('AUDIT_EVENT_REPOSITORY');
 export const SECURITY_EVENT_REPOSITORY = Symbol('SECURITY_EVENT_REPOSITORY');
@@ -53,9 +54,11 @@ export interface IAuditRecordRepository<T> {
   /**
    * §29, §14.4: keyset pagination on `(organization_id, occurred_at DESC, id)`
    * — never OFFSET. Scoped to the caller's own organisation, in application
-   * code AND by RLS underneath.
+   * code AND by RLS underneath. `query.eventType`, when present, is an
+   * additional exact-match predicate on the same scoped read — never a
+   * separate unscoped query.
    */
-  listPage(query: CursorQuery, manager: EntityManager): Promise<CursorPage<T>>;
+  listPage(query: ListAuditQueryDto, manager: EntityManager): Promise<CursorPage<T>>;
 
   /**
    * §13.6: the platform-admin variant. A platform admin's context carries
@@ -70,7 +73,7 @@ export interface IAuditRecordRepository<T> {
    * §13.6). Do not call this from any path that has not already asserted the
    * caller is a platform admin.
    */
-  listAllForPlatformAdmin(query: CursorQuery, manager: EntityManager): Promise<CursorPage<T>>;
+  listAllForPlatformAdmin(query: ListAuditQueryDto, manager: EntityManager): Promise<CursorPage<T>>;
 }
 
 export type IAuditEventRepository = IAuditRecordRepository<AuditEvent>;

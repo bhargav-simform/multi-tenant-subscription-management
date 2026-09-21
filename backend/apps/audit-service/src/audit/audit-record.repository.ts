@@ -1,11 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { EntityManager, EntityTarget } from 'typeorm';
-import type { CursorPage, CursorQuery } from '@app/common';
+import type { CursorPage } from '@app/common';
 import { TenantContextStore } from '@app/tenant-context';
 import { TenantRepository } from '@app/database';
 import { AuditEvent } from './audit-event.entity';
 import { SecurityEvent } from './security-event.entity';
 import type { AuditRecordBaseEntity } from './audit-record-base.entity';
+import type { ListAuditQueryDto } from './dto/list-audit-query.dto';
 import type {
   CreateAuditRecordData,
   IAuditEventRepository,
@@ -67,7 +68,7 @@ export abstract class AuditRecordRepository<T extends AuditRecordBaseEntity>
   }
 
   /** §29, §14.4: keyset pagination on (occurred_at DESC, id) within the caller's org. */
-  async listPage(query: CursorQuery, manager: EntityManager): Promise<CursorPage<T>> {
+  async listPage(query: ListAuditQueryDto, manager: EntityManager): Promise<CursorPage<T>> {
     return this.paginate(query, manager, this.organizationId);
   }
 
@@ -81,14 +82,14 @@ export abstract class AuditRecordRepository<T extends AuditRecordBaseEntity>
    * does not live here.
    */
   async listAllForPlatformAdmin(
-    query: CursorQuery,
+    query: ListAuditQueryDto,
     manager: EntityManager,
   ): Promise<CursorPage<T>> {
     return this.paginate(query, manager, null);
   }
 
   private async paginate(
-    query: CursorQuery,
+    query: ListAuditQueryDto,
     manager: EntityManager,
     organizationId: string | null,
   ): Promise<CursorPage<T>> {
@@ -102,6 +103,10 @@ export abstract class AuditRecordRepository<T extends AuditRecordBaseEntity>
 
     if (organizationId !== null) {
       qb.andWhere('e.organizationId = :organizationId', { organizationId });
+    }
+
+    if (query.eventType) {
+      qb.andWhere('e.eventType = :eventType', { eventType: query.eventType });
     }
 
     if (query.cursor) {

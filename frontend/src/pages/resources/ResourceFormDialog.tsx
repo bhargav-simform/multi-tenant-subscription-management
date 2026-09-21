@@ -15,23 +15,25 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { LABELS } from '@/constants/labels';
 import { useCreateResource } from '@/hooks/resources/mutations';
-import { createResourceSchema, type CreateResourceFormValues } from '@/schemas/resources';
+import { createResourceSchema, mbToBytes, type CreateResourceFormValues } from '@/schemas/resources';
 
 export function ResourceFormDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
     const { mutateAsync: create, isPending } = useCreateResource();
 
     const form = useForm<CreateResourceFormValues>({
         resolver: zodResolver(createResourceSchema),
-        defaultValues: { name: '', description: '', sizeBytes: 0 },
+        defaultValues: { name: '', description: '', sizeMb: 0 },
     });
 
     const onSubmit = async (values: CreateResourceFormValues) => {
         // A storage-limit refusal is reported by the mutation's own toast, with the
         // server's specific message. The dialog stays open so the user can adjust
         // the size and try again rather than losing what they typed.
+        // sizeMb never leaves the browser — the API's CreateResourceDto only knows
+        // sizeBytes, so the conversion happens right here, at the call boundary.
         const result = await create({
             name: values.name,
-            sizeBytes: values.sizeBytes,
+            sizeBytes: mbToBytes(values.sizeMb),
             ...(values.description ? { description: values.description } : {}),
         }).catch(() => null);
         if (!result) return;
@@ -77,15 +79,15 @@ export function ResourceFormDialog({ open, onOpenChange }: { open: boolean; onOp
                         />
                         <FormField
                             control={form.control}
-                            name="sizeBytes"
+                            name="sizeMb"
                             render={({ field }) => (
                                 <FormItem>
-                                    <FormLabel required>{LABELS.RESOURCES.SIZE_BYTES}</FormLabel>
+                                    <FormLabel required>{LABELS.RESOURCES.SIZE_MB}</FormLabel>
                                     <FormControl>
                                         <Input
                                             type="number"
                                             min={0}
-                                            step={1}
+                                            step={0.1}
                                             {...field}
                                             // A number input hands back a string; the schema expects a
                                             // number, so it is converted here rather than loosened there.

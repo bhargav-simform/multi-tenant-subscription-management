@@ -22,4 +22,9 @@ export class ListAuditQueryDto {
   @Min(1)
   @Max(100)
   limit?: number;
+
+  /** Exact match, e.g. "UserInvited" — filters the same RLS/platform-admin-scoped read, never a separate query. */
+  @IsOptional()
+  @IsString()
+  eventType?: string;
 }

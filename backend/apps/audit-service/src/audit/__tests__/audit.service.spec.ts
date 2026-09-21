@@ -187,6 +187,19 @@ describe('AuditService', () => {
       expect(result.hasMore).toBe(true);
       expect(result.nextCursor).toBe('opaque-cursor');
     });
+
+    it('forwards eventType to the repository as an additional filter on the same scoped read', async () => {
+      const { service, tenantContext, auditEvents } = await buildService({});
+
+      await tenantContext.run(buildContext([Role.ORG_ADMIN], ORG_A), () =>
+        service.listAuditEvents({ eventType: 'UserInvited' }),
+      );
+
+      expect(auditEvents.listPage).toHaveBeenCalledWith(
+        expect.objectContaining({ eventType: 'UserInvited' }),
+        expect.anything(),
+      );
+    });
   });
 
   describe('GET /audit — platform admin (§8.7 "metadata-level events only")', () => {

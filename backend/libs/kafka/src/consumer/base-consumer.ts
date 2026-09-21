@@ -25,24 +25,38 @@ const RETRY_DELAYS_MS = [1000, 5000, 25000];
 export abstract class BaseKafkaConsumer implements OnModuleInit, OnModuleDestroy {
   protected abstract readonly topic: KafkaTopic;
   protected readonly logger = new Logger(this.constructor.name);
-  private readonly consumer: Consumer;
+  private consumer!: Consumer;
 
   constructor(
     private readonly options: KafkaModuleOptions,
     private readonly tenantContext: TenantContextStore,
     private readonly consumedEvents: ConsumedEventStore,
-  ) {
-    const kafka = new Kafka({
-      clientId: `${options.clientIdPrefix}-${options.serviceName}`,
-      brokers: options.brokers,
-    });
-    this.consumer = kafka.consumer({ groupId: options.groupId });
-  }
+  ) {}
 
   /** Implemented by each concrete consumer. Runs INSIDE the tenant ALS scope. */
   protected abstract handle(envelope: EventEnvelope): Promise<void>;
 
   async onModuleInit(): Promise<void> {
+    // groupId is derived from `this.topic` (an abstract member a subclass sets,
+    // so unreadable from the constructor above) rather than the shared
+    // `options.groupId` alone — a service that runs more than one
+    // BaseKafkaConsumer subclass (e.g. audit-service's five, one per topic) had
+    // every instance join the SAME Kafka consumer group while each subscribed
+    // to a different single topic. Kafka's group protocol assigns partitions
+    // from whatever subscription the rebalance's elected leader observes for
+    // that round, not a per-member union of subscriptions — confirmed
+    // empirically: only one of five instances ever received a partition
+    // assignment, the other four's topics went completely unconsumed with no
+    // error, no log, nothing to indicate they were starved. One real,
+    // independent consumer group per topic — not per service — is what makes
+    // every topic's assignment independent of how many OTHER topics this
+    // service also happens to consume.
+    const kafka = new Kafka({
+      clientId: `${this.options.clientIdPrefix}-${this.options.serviceName}`,
+      brokers: this.options.brokers,
+    });
+    this.consumer = kafka.consumer({ groupId: `${this.options.groupId}-${this.topic}` });
+
     await this.consumer.connect();
     await this.consumer.subscribe({ topic: this.topic, fromBeginning: false });
     await this.consumer.run({

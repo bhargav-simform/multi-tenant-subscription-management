@@ -1,5 +1,5 @@
 import { ForbiddenException, Inject, Injectable } from '@nestjs/common';
-import type { CursorPage, CursorQuery } from '@app/common';
+import type { CursorPage } from '@app/common';
 import { Role } from '@app/common';
 import { TenantContextStore } from '@app/tenant-context';
 import { TenantAwareDataSource } from '@app/database';
@@ -14,6 +14,7 @@ import {
   AuditEventMetadataResponseDto,
   AuditEventResponseDto,
 } from './dto/audit-event-response.dto';
+import type { ListAuditQueryDto } from './dto/list-audit-query.dto';
 
 /**
  * §8.7. Orchestration and transaction boundaries only — and, unusually for this
@@ -50,7 +51,7 @@ export class AuditService {
    * falls into.
    */
   async listAuditEvents(
-    query: CursorQuery,
+    query: ListAuditQueryDto,
   ): Promise<CursorPage<AuditEventResponseDto | AuditEventMetadataResponseDto>> {
     if (this.isPlatformAdminContext()) {
       // §13.6: no organisation to scope by, so runGlobal() — the transaction
@@ -93,7 +94,7 @@ export class AuditService {
    * but still an endpoint §8.7 does not give them. The explicit check is what
    * makes the route's contract match its documentation.
    */
-  async listSecurityEvents(query: CursorQuery): Promise<CursorPage<AuditEventResponseDto>> {
+  async listSecurityEvents(query: ListAuditQueryDto): Promise<CursorPage<AuditEventResponseDto>> {
     this.requirePlatformAdmin();
 
     const page = await this.tenantDataSource.runGlobal((manager) =>

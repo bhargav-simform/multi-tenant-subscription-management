@@ -2,13 +2,18 @@ import { ENDPOINTS } from '@/constants/endpoints';
 import api from '@/services/api';
 import type { AuditEvent, AuditEventMetadata, CursorPage, CursorQuery } from '@/types/api';
 
+export interface ListAuditEventsQuery extends CursorQuery {
+    /** Exact match, e.g. "UserInvited" — same scoped read, filtered server-side. */
+    eventType?: string;
+}
+
 export const auditApi = {
     /**
      * Audit records arrive at audit-service over Kafka and only over Kafka, so
      * there is no write route here — by design, no service can be persuaded to
      * skip writing its trail.
      */
-    list: async (query: CursorQuery = {}): Promise<CursorPage<AuditEvent>> => {
+    list: async (query: ListAuditEventsQuery = {}): Promise<CursorPage<AuditEvent>> => {
         const { data } = await api.get<CursorPage<AuditEvent>>(ENDPOINTS.AUDIT.LIST, { params: query });
         return data;
     },

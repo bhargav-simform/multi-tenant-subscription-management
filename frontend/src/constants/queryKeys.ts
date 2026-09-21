@@ -35,7 +35,8 @@ export const QUERY_KEYS = {
     },
     AUDIT: {
         ALL: ['audit'] as const,
-        LIST: (cursor?: string, limit?: number) => ['audit', 'list', { cursor, limit }] as const,
+        LIST: (cursor?: string, limit?: number, eventType?: string) =>
+            ['audit', 'list', { cursor, limit, eventType }] as const,
         SECURITY: (cursor?: string, limit?: number) => ['audit', 'security', { cursor, limit }] as const,
     },
     ADMIN: {
