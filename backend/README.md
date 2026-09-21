@@ -20,11 +20,28 @@ only what's specific to working inside `backend/` — running a single service, 
 Each service owns its own data — no service reaches into another's tables. §7 of the architecture
 doc explains why each one exists; §14 says who owns what.
 
-## Stack
+## Tech stack
 
-NestJS · TypeScript · **TypeORM** (the only permitted ORM — never Prisma, Sequelize, Drizzle or
-Mongoose) · PostgreSQL with Row-Level Security · Kafka (KRaft mode) · Redis · JWT + Passport +
-Argon2 · CASL · **pnpm** (never `npm install` or `yarn add`) · Jest + Testcontainers.
+| Layer | Technology | Version |
+|---|---|---|
+| Framework | NestJS (`@nestjs/core`) | 12.0.1 |
+| Language | TypeScript | 5.9.3 |
+| ORM | TypeORM (the only permitted ORM — never Prisma, Sequelize, Drizzle or Mongoose) | 1.1.1 |
+| Database | PostgreSQL, with Row-Level Security | 17 |
+| Message broker | Apache Kafka (`kafkajs`, KRaft mode) | 2.2.4 |
+| Cache / idempotency | Redis (`ioredis`) | 5.11.1 |
+| Auth | `@nestjs/jwt` + Passport + Argon2 | 12.0.1 / 0.7.0 / 0.45.1 |
+| Authorization | CASL (`@casl/ability`) | 7.0.1 |
+| Config | `@nestjs/config` | 12.0.0 |
+| Rate limiting | `@nestjs/throttler` | 6.5.0 |
+| Scheduling | `@nestjs/schedule` (invitation-expiry sweep) | 12.0.2 |
+| Logging | Pino (`nestjs-pino`) | 5.1.0 |
+| Validation | class-validator + class-transformer | 0.15.1 / 0.5.1 |
+| HTTP client (inter-service) | Axios (`@nestjs/axios`) | 1.20.0 / 12.0.1 |
+| Testing | Jest + Testcontainers (Postgres) | 30.5.1 / 12.1.0 |
+| Linting / formatting | ESLint + Prettier | 10.10.0 / 3.9.6 |
+| Package manager | pnpm | 10.32.1 |
+| Runtime | Node.js | `>= 22` |
 
 ## Install
 
@@ -120,7 +137,3 @@ the right repository method. They live under `test/integration/<service>/`.
   role created in `docker/postgres/init.sh`), never by `app_migrator` — see the comment in
   `apps/user-service/src/database/migrations/1700000000004-AddUserExistsFunction.ts` for the
   reasoning and the empirically-confirmed failure mode it fixes.
-
-Full implementation rules live in [.claude/skills/](../.claude/skills/) — in particular
-`tenant-isolation`, `concurrency-safety`, `casl-authorization`, `nest-service` and
-`typeorm-entity`.

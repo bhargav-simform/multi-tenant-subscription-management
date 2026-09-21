@@ -11,10 +11,27 @@ Login / signup · Dashboard (plan, seats, storage, recent users) · Resources (i
 cross-tenant detail view) · Users (invite, role change, revoke/remove) · Plan & usage · Audit log
 · a structurally separate platform-admin shell (organisations list/detail, security events).
 
-## Stack
+## Tech stack
 
-React · TypeScript · Vite · Tailwind · TanStack Query + TanStack Table · React Hook Form + Zod ·
-Vitest + React Testing Library · **pnpm** (never `npm install` or `yarn add`).
+| Layer | Technology | Version |
+|---|---|---|
+| Framework | React | 19.3.0 |
+| Language | TypeScript | 5.9.3 |
+| Build tool | Vite | 7.3.6 |
+| Styling | Tailwind CSS | 4.3.3 |
+| UI primitives | Radix UI (`radix-ui`) | 1.6.7 |
+| Server state | TanStack Query | 5.103.1 |
+| Tables | TanStack Table | 8.21.3 |
+| Forms | React Hook Form | 7.88.0 |
+| Validation | Zod | 4.6.5 |
+| Routing | React Router | 7.18.4 |
+| HTTP client | Axios | 1.20.0 |
+| Toasts | Sonner | 2.0.8 |
+| Icons | Lucide React | 0.475.0 |
+| Testing | Vitest + React Testing Library | 3.2.7 / 16.3.3 |
+| Linting | ESLint (flat config) | 9.39.3 |
+| Package manager | pnpm | `>= 9` (`packageManager: pnpm@9.15.4`) |
+| Runtime | Node.js | `>= 20` |
 
 Server state (anything that comes from the API) is owned entirely by TanStack Query — no Redux,
 Zustand or MobX in this codebase. Forms are React Hook Form + Zod, mirroring the backend's
@@ -83,6 +100,3 @@ pnpm vitest run src/pages/users/__tests__/UsersPage.test.tsx
 - A form's Zod schema mirrors its backend DTO's class-validator rules (min lengths, formats) —
   client-side validation is a convenience for the user, never the actual control; the server
   always validates independently.
-
-Full implementation rules live in [.claude/skills/](../.claude/skills/) — in particular
-`react-feature`.

@@ -29,23 +29,43 @@ a spreadsheet nobody enforces, and onboarding a new client means an engineer cre
 |---|---|
 | [Architecture](docs/architecture/ARCHITECTURE.md) | The full technical design — 32 sections. **Start here** |
 | [POC Brief](docs/architecture/POC-BRIEF.md) | The source requirements |
-| [backend/README.md](backend/README.md) | Backend-only setup, per-service commands, migrations, testing |
-| [frontend/README.md](frontend/README.md) | Frontend-only setup, dev server, build, testing |
+| [backend/README.md](backend/README.md) | Backend tech stack, setup, per-service commands, migrations, testing |
+| [frontend/README.md](frontend/README.md) | Frontend tech stack, setup, dev server, build, testing |
 
 Sections worth reading first: **§13 Tenant Isolation** and **§19 Concurrency** — the rest of the
 architecture is subordinate to those two.
 
-## Stack
+## Tech stack
 
-**Backend** — NestJS microservices · TypeScript · **TypeORM** (the only permitted ORM) ·
-PostgreSQL · Kafka (KRaft) · Redis · JWT + Passport + Argon2 · CASL · **pnpm**
+| Layer | Technology | Version |
+|---|---|---|
+| Backend framework | NestJS (`@nestjs/core`) | 12.0.1 |
+| Language (backend) | TypeScript | 5.9.3 |
+| ORM | TypeORM | 1.1.1 |
+| Database | PostgreSQL | 17 (alpine) |
+| Message broker | Apache Kafka (KRaft mode, no ZooKeeper) | 4.0.0 |
+| Cache / idempotency store | Redis | 8 (alpine) |
+| Authentication | JWT (`@nestjs/jwt`) + Passport + Argon2 | 12.0.1 / 0.7.0 / 0.45.1 |
+| Authorization | CASL (`@casl/ability`) | 7.0.1 |
+| Logging | Pino (`nestjs-pino`) | 5.1.0 |
+| Frontend framework | React | 19.3.0 |
+| Language (frontend) | TypeScript | 5.9.3 |
+| Build tool | Vite | 7.3.6 |
+| Styling | Tailwind CSS | 4.3.3 |
+| Server state | TanStack Query | 5.103.1 |
+| Tables | TanStack Table | 8.21.3 |
+| Forms | React Hook Form + Zod | 7.88.0 / 4.6.5 |
+| Routing | React Router | 7.18.4 |
+| HTTP client | Axios | 1.20.0 |
+| Backend test runner | Jest + Testcontainers | 30.5.1 |
+| Frontend test runner | Vitest + React Testing Library | 3.2.7 / 16.3.3 |
+| Package manager | pnpm | 10.32.1 |
+| Runtime | Node.js | 22.18.0 |
+| Containerisation | Docker Compose | — |
 
-**Frontend** — React · TypeScript · Vite · Tailwind · TanStack Query + Table · React Hook Form +
-Zod · Vitest + RTL · **pnpm**
-
-Seven services: `api-gateway`, `auth-service`, `tenant-service`, `user-service`,
-`subscription-service`, `resource-service`, `audit-service`. Each owns its data; §7 explains why
-each exists and §14 who owns what.
+Seven backend services: `api-gateway`, `auth-service`, `tenant-service`, `user-service`,
+`subscription-service`, `resource-service`, `audit-service`. Each owns its data; §7 of the
+architecture doc explains why each exists and §14 who owns what.
 
 ## Repository layout
 
@@ -54,8 +74,15 @@ backend/     NestJS monorepo — pnpm workspace   (7 services, complete)
 frontend/    React SPA — pnpm, Vite, Tailwind    (all screens, own Dockerfile)
 docker/      postgres init + one-shot migrator
 docs/        architecture + brief
-.claude/     skills and agents governing implementation
 ```
+
+## Prerequisites
+
+- **Docker** `>= 29.4.1` and **Docker Compose** `>= v5.1.3` — this is the only way this project is
+  intended to run. There is no host-level requirement to install Node, pnpm, Postgres, Redis or
+  Kafka yourself; every one of those runs inside a container.
+- For working on the backend or frontend source directly (outside Docker — see each package's own
+  README), you additionally need **Node.js >= 22.18.0** and **pnpm >= 10.32.1**.
 
 ## Getting started
 
@@ -67,36 +94,64 @@ cp .env.example .env     # edit the secrets — see the notes in the file
 docker compose up
 ```
 
+That single command builds every image (first run only — subsequent runs reuse the cache) and
+starts all eleven containers in dependency order.
+
+## Docker
+
+### Full stack
+
+```bash
+docker compose up            # build (if needed) and start every container, logs attached
+docker compose up -d         # same, detached
+docker compose ps            # status + health of every container
+docker compose down          # stop and remove all containers (keeps the postgres volume)
+docker compose down -v       # same, and also drop the postgres volume (fresh DB next run)
+```
+
 There is no separate migration step and no seeding step: a one-shot `migrator` container runs
 every service's migrations as `app_migrator`, seeds the platform admin, and exits before any
 application service starts (`depends_on: condition: service_completed_successfully`).
 
-Eleven containers, **two published ports**, matching §27.1: `api-gateway` on
-<http://localhost:3000> and `frontend` on <http://localhost:5178>. Postgres, Redis, Kafka and the
-six non-gateway backend services are on an internal bridge network with no port mapping at all —
-§10.5 layer 1, expressed as configuration. `frontend` isn't on that internal network at all: its
-compiled JS runs in the browser and calls `api-gateway`'s host-published port directly, so it has
-no need for a container-to-container path to any backend service.
+Eleven containers, **two published ports**: `api-gateway` on <http://localhost:3000> and
+`frontend` on <http://localhost:5178>. Postgres, Redis, Kafka and the six non-gateway backend
+services are on an internal bridge network with no port mapping at all. `frontend` isn't on that
+internal network either: its compiled JS runs in the browser and calls `api-gateway`'s
+host-published port directly, so it has no need for a container-to-container path to any backend
+service.
 
-### Root-level commands
+| Container | Image / build | Published port |
+|---|---|---|
+| `postgres` | `postgres:17-alpine` | internal only |
+| `redis` | `redis:8-alpine` | internal only |
+| `kafka` | `bitnamilegacy/kafka:4.0.0-debian-12-r10` (KRaft mode) | internal only |
+| `migrator` | `backend/Dockerfile` (one-shot, exits on success) | — |
+| `api-gateway` | `backend/Dockerfile` | `127.0.0.1:3000` |
+| `auth-service` | `backend/Dockerfile` | internal only |
+| `tenant-service` | `backend/Dockerfile` | internal only |
+| `user-service` | `backend/Dockerfile` | internal only |
+| `subscription-service` | `backend/Dockerfile` | internal only |
+| `resource-service` | `backend/Dockerfile` | internal only |
+| `audit-service` | `backend/Dockerfile` | internal only |
+| `frontend` | `frontend/Dockerfile` (nginx serving the static build) | `127.0.0.1:5178` |
 
-Everything below runs from the repository root, against the full stack. For commands scoped to
-just one half of the codebase (per-service backend commands, or the frontend dev server), see
-[backend/README.md](backend/README.md) and [frontend/README.md](frontend/README.md).
+### Rebuilding after a code change
 
 ```bash
-docker compose up                    # build (if needed) and start every container
-docker compose up -d                 # same, detached
-docker compose up -d --build <name>  # rebuild and restart one container after a code change
-docker compose ps                    # status + health of every container
-docker compose logs -f <name>        # tail one service's logs
-docker compose down                  # stop and remove all containers (keeps the postgres volume)
-docker compose down -v               # same, and also drop the postgres volume (fresh DB next run)
+docker compose build <name>              # rebuild one image
+docker compose up -d --build <name>      # rebuild and restart one container in one step
+docker compose logs -f <name>            # tail one container's logs
 ```
 
-`<name>` is any service from `docker-compose.yml`: `postgres`, `redis`, `kafka`, `migrator`,
-`api-gateway`, `auth-service`, `tenant-service`, `user-service`, `subscription-service`,
-`resource-service`, `audit-service`, `frontend`.
+`<name>` is any container from the table above, e.g. `docker compose up -d --build user-service`.
+
+A change under `backend/libs/` is shared by six services (everything except `frontend`) — rebuild
+and restart all of them, not just the one you edited directly:
+
+```bash
+docker compose build audit-service auth-service resource-service subscription-service tenant-service user-service
+docker compose up -d audit-service auth-service resource-service subscription-service tenant-service user-service
+```
 
 ### Seed data
 
@@ -107,10 +162,35 @@ docker compose down -v               # same, and also drop the postgres volume (
   column that makes `AuthService.resolveRoles` return `PLATFORM_ADMIN`. Seeded from
   `PLATFORM_ADMIN_EMAIL` / `PLATFORM_ADMIN_PASSWORD`; leave the password empty to skip it.
 
-## Conventions
+## Environment variables
 
-Implementation is governed by the skills in [.claude/skills/](.claude/skills/). The rules that
-matter most:
+All of `.env.example`, grouped as the file itself groups them. Every backend service reads the
+same `.env` — NestJS's `ConfigService` picks out only what each service asks for.
+
+| Variable | Description |
+|---|---|
+| `NODE_ENV` | `development` \| `production` |
+| `LOG_LEVEL` | Pino log level, e.g. `debug` |
+| `POSTGRES_HOST` / `POSTGRES_PORT` | Postgres connection target (container name inside Docker) |
+| `POSTGRES_SUPERUSER` / `POSTGRES_SUPERUSER_PASSWORD` | Used once, by `docker/postgres/init.sh`, to create the app roles below |
+| `APP_DB_USER` / `APP_DB_PASSWORD` | Runtime role every service connects as — `NOBYPASSRLS`, enforced at boot |
+| `MIGRATOR_DB_USER` / `MIGRATOR_DB_PASSWORD` | DDL role the one-shot `migrator` container connects as |
+| `TENANT_DB_NAME` / `AUTH_DB_NAME` / `CORE_DB_NAME` / `RESOURCE_DB_NAME` / `AUDIT_DB_NAME` | One physical database per bounded context (`CORE_DB_NAME` is shared by user-service and subscription-service, in separate schemas) |
+| `REDIS_HOST` / `REDIS_PORT` | Redis connection target |
+| `KAFKA_BROKERS` / `KAFKA_CLIENT_ID_PREFIX` | Kafka connection target and client ID prefix |
+| `JWT_SECRET` / `JWT_ACCESS_EXPIRES_IN` / `JWT_REFRESH_EXPIRES_IN` | Access-token signing secret and TTLs |
+| `INTERNAL_SIGNING_SECRET` / `INTERNAL_CONTEXT_TTL_SECONDS` | Signs the internal service-to-service context header — **must differ** from `JWT_SECRET` |
+| `CORS_ORIGINS` | Allowed browser origin(s) on `api-gateway` — must match wherever `frontend` is actually served from |
+| `THROTTLE_TTL` / `THROTTLE_LIMIT` / `THROTTLE_AUTH_LIMIT` | Rate limiting window, general limit, and the stricter limit on `/auth/login` + `/onboarding/signup` |
+| `ARGON2_MEMORY_COST` / `ARGON2_TIME_COST` / `ARGON2_PARALLELISM` | Password hashing cost parameters |
+| `AUTH_SERVICE_URL` / `TENANT_SERVICE_URL` / `USER_SERVICE_URL` / `SUBSCRIPTION_SERVICE_URL` / `RESOURCE_SERVICE_URL` / `AUDIT_SERVICE_URL` | Internal, container-to-container base URLs for inter-service calls |
+| `PLATFORM_ADMIN_EMAIL` / `PLATFORM_ADMIN_PASSWORD` | Seeds the one platform-admin credential on first migrator run; leave the password empty to skip the seed |
+| `VITE_API_BASE_URL` | Frontend build-time value — the origin the SPA's compiled JS calls |
+
+`PORT` is not set in `.env` at all — it's fixed per service in `docker-compose.yml`'s
+`environment:` block, since seven services cannot share one port value.
+
+## Conventions
 
 - **TypeORM only.** Never Prisma, Sequelize, Drizzle or Mongoose.
 - **pnpm only.** Never `npm install` or `yarn add`.
