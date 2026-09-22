@@ -35,9 +35,43 @@
     --color-slate-800: #1e293b;
     --color-slate-900: #0f172a;
 
+    /* ── Cream / charcoal / orange-red palette (brand v2) ──────
+       Replaces teal as the primary brand hue app-wide. Teal/slate above are
+       KEPT (not deleted) — they remain valid secondary badge tones. */
+    --color-cream-50: #f5f1e8; /* content-bg */
+    --color-cream-100: #f7f4ec; /* table-header-bg */
+    --color-cream-200: #eae6dc; /* border-subtle */
+
+    --color-charcoal-950: #10140f; /* sidebar-bg (tenant) */
+    --color-charcoal-900: #1a1f18; /* sidebar-card-bg (upsell card) */
+    --color-charcoal-800: #1d231c; /* sidebar-active-highlight */
+
+    --color-accent-50: #fce6de;
+    --color-accent-500: #e8552f; /* brand accent */
+    --color-accent-600: #cc4726; /* accent hover */
+
+    --color-ink-900: #161512; /* text-heading */
+    --color-ink-600: #5c5a54; /* text-body */
+    --color-ink-400: #9a968c; /* text-muted */
+    --color-ink-300: #8a9088; /* sidebar-text-dim */
+
+    /* ── File-type / avatar pastel tiles (deterministic rotation) ── */
+    --tile-purple-bg: #eae2fa;
+    --tile-purple-fg: #7c5cd6;
+    --tile-peach-bg: #fbe3d3;
+    --tile-peach-fg: #d9773f;
+    --tile-blue-bg: #dceafb;
+    --tile-blue-fg: #3e76c4;
+    --tile-mint-bg: #d9f3e4;
+    --tile-mint-fg: #2e9a63;
+    --tile-teal-bg: #153e3a; /* avatar-only extra tone */
+    --tile-teal-fg: #ffffff;
+    --tile-gold-bg: #d9a441; /* avatar-only extra tone */
+    --tile-gold-fg: #ffffff;
+
     /* ── Legacy alias tokens ─────────────────────────────────── */
-    --color-primary-hover: #0f766e; /* teal-700 */
-    --color-primary-light: #f0fdfa; /* teal-50  */
+    --color-primary-hover: #cc4726; /* accent-600 */
+    --color-primary-light: #fce6de; /* accent-50  */
     --color-surface: #f8fafc;
     --color-text-primary: #0f172a;
     --color-text-secondary: #64748b;
@@ -47,16 +81,17 @@
     --color-white: #ffffff;
 
     /* ── Table ───────────────────────────────────────────────── */
-    --table-header-bg: var(--color-white);
+    --table-header-bg: var(--color-cream-100);
     --table-header-text: #020617; /* slate-950 */
     --table-border-strong: #cbd5e1; /* slate-300 — sticky column divider */
+    --table-row-hover: var(--color-cream-100);
 
     /* ── Usage meters (plan limits) ──────────────────────────────────────────
        A seat/storage meter is the one place in this product where colour carries
        real meaning: it is how an org admin learns a limit is about to refuse an
        action. Thresholds live in constants/plan.ts, the colours here. */
     --meter-track: #e2e8f0; /* slate-200 */
-    --meter-safe: #0d9488; /* teal-600   — under the warn threshold */
+    --meter-safe: #e8552f; /* accent-500 — under the warn threshold */
     --meter-warn: #d97706; /* amber-600  — approaching the cap      */
     --meter-full: #dc2626; /* red-600    — at or over the cap       */
 
@@ -66,18 +101,18 @@
     --badge-teal-bg: #ccfbf1;
     --badge-teal-border: #5eead4;
     --badge-teal-text: #0f766e;
-    --badge-green-bg: #dcfce7;
-    --badge-green-border: #86efac;
-    --badge-green-text: #15803d;
-    --badge-amber-bg: #fef3c7;
-    --badge-amber-border: #fcd34d;
-    --badge-amber-text: #b45309;
-    --badge-red-bg: #fee2e2;
-    --badge-red-border: #fca5a5;
-    --badge-red-text: #b91c1c;
-    --badge-slate-bg: #f1f5f9;
-    --badge-slate-border: #cbd5e1;
-    --badge-slate-text: #475569;
+    --badge-green-bg: #dcf3e1;
+    --badge-green-border: #1d7a3e;
+    --badge-green-text: #1d7a3e;
+    --badge-amber-bg: #fcefc7;
+    --badge-amber-border: #92660b;
+    --badge-amber-text: #92660b;
+    --badge-red-bg: #fbdeda;
+    --badge-red-border: #b3311a;
+    --badge-red-text: #b3311a;
+    --badge-slate-bg: #eeece6;
+    --badge-slate-border: #66635b;
+    --badge-slate-text: #66635b;
     --badge-violet-bg: #ede9fe;
     --badge-violet-border: #ddd6fe;
     --badge-violet-text: #6d28d9;
@@ -99,6 +134,19 @@
     --toast-info-background: #f0fdfa;
     --toast-description-text: #1e293b;
 
+    /* ── Card accents (stat-card icon tint / left border) ──────
+       Aliases onto the existing badge text tones — no new hues introduced. */
+    --card-accent-teal: var(--badge-teal-text);
+    --card-accent-green: var(--badge-green-text);
+    --card-accent-amber: var(--badge-amber-text);
+    --card-accent-red: var(--badge-red-text);
+    --card-accent-slate: var(--badge-slate-text);
+    --card-accent-violet: var(--badge-violet-text);
+
+    /* ── Sidebar active-nav indicator ─────────────────────────── */
+    --sidebar-active-indicator: var(--color-accent-500);
+    --sidebar-admin-active-indicator: #3e76c4; /* tile-blue-fg — cool blue, reads distinct from orange-red */
+
     /* ── Component size tokens ───────────────────────────────── */
     --badge-height: 1.625rem; /* 26px */
     --section-header-bg: #f1f5f9;
@@ -107,27 +155,32 @@
     --radius: 0.625rem;
 
     /* ── Shadows ─────────────────────────────────────────────── */
-    --shadow-card: 0px 1px 2px 0px rgba(15, 23, 42, 0.05);
+    --shadow-card:
+        0px 1px 2px 0px rgba(15, 23, 42, 0.06),
+        0px 1px 3px 0px rgba(15, 23, 42, 0.08);
+    --shadow-card-hover:
+        0px 2px 4px 0px rgba(15, 23, 42, 0.06),
+        0px 4px 8px 0px rgba(15, 23, 42, 0.08);
 
     /* ── shadcn semantic palette ─────────────────────────────── */
-    --background: #f8fafc;
-    --foreground: #0f172a;
+    --background: #f5f1e8; /* cream-50 — warm content canvas */
+    --foreground: #161512; /* ink-900 */
     --card: #ffffff;
-    --card-foreground: #0f172a;
+    --card-foreground: #161512;
     --popover: #ffffff;
-    --popover-foreground: #0f172a;
-    --primary: #0d9488; /* teal-600 */
+    --popover-foreground: #161512;
+    --primary: #e8552f; /* accent-500 */
     --primary-foreground: #ffffff;
     --secondary: #f1f5f9; /* slate-100 */
-    --secondary-foreground: #134e4a; /* teal-900 */
+    --secondary-foreground: #161512;
     --muted: #f1f5f9;
-    --muted-foreground: #64748b;
-    --accent: #f0fdfa; /* teal-50 */
-    --accent-foreground: #134e4a;
+    --muted-foreground: #5c5a54; /* ink-600 */
+    --accent: #fce6de; /* accent-50 */
+    --accent-foreground: #b3311a;
     --destructive: #dc2626;
-    --border: #e2e8f0;
-    --input: #e2e8f0;
-    --ring: #0d9488;
+    --border: #eae6dc; /* cream-200 */
+    --input: #eae6dc;
+    --ring: #e8552f;
 
     --chart-1: #0d9488;
     --chart-2: #0ea5e9;
@@ -135,26 +188,31 @@
     --chart-4: #f59e0b;
     --chart-5: #64748b;
 
-    /* ── Sidebar — deep teal, mirroring SimERP's deep-violet rail ─────────── */
-    --sidebar: #134e4a;
+    /* ── Sidebar — near-black, orange-red accent (brand v2) ───────────────── */
+    --sidebar: #10140f; /* charcoal-950 */
     --sidebar-foreground: #fafafa;
-    --sidebar-primary: #ccfbf1;
-    --sidebar-primary-foreground: #134e4a;
+    --sidebar-primary: #fce6de;
+    --sidebar-primary-foreground: #10140f;
     --sidebar-accent: #ffffff;
     --sidebar-accent-foreground: #171717;
     --sidebar-border: rgba(255, 255, 255, 0.2);
     --sidebar-ring: rgba(255, 255, 255, 0.4);
-    --sidebar-gradient-from: #134e4a;
-    --sidebar-gradient-to: #115e59;
+    /* from === to: a flat fill via the existing gradient utility, so no
+       class-name churn is needed in AppSidebar/TenantLayout/AdminLayout. */
+    --sidebar-gradient-from: #10140f;
+    --sidebar-gradient-to: #10140f;
+    --sidebar-card-bg: #1a1f18; /* charcoal-900 — storage-upsell card */
+    --sidebar-active-highlight: #1d231c; /* charcoal-800 */
+    --sidebar-text-dim: #8a9088; /* ink-300 */
 
     /* ── Platform-admin rail ─────────────────────────────────────────────────
-       Platform admins see metadata only, never tenant content (§13.6). The
-       admin shell is a visibly different colour so it is obvious at a glance
-       which side of that boundary a screen is on. */
-    --sidebar-admin-from: #1e293b; /* slate-800 */
-    --sidebar-admin-to: #334155; /* slate-700 */
+       Platform admins see metadata only, never tenant content (§13.6). Both
+       shells are near-black now, so the boundary is made visible by ACCENT HUE
+       instead of darkness: tenant = orange-red, admin = cool blue. */
+    --sidebar-admin-from: #10141a; /* near-black, cool blue-gray cast */
+    --sidebar-admin-to: #10141a;
 
-    --alert-background: #f0fdfa;
+    --alert-background: #fce6de;
     --tooltip-background: #f1f5f9;
     --overlay-background: rgba(15, 23, 42, 0.4);
     --accordion-border: rgba(255, 255, 255, 0.2);
@@ -197,8 +255,8 @@ body {
     --color-popover-foreground: var(--popover-foreground);
     --color-primary: var(--primary);
     --color-primary-foreground: var(--primary-foreground);
-    --color-primary-hover: #0f766e;
-    --color-primary-light: #f0fdfa;
+    --color-primary-hover: #cc4726;
+    --color-primary-light: #fce6de;
     --color-secondary: var(--secondary);
     --color-secondary-foreground: var(--secondary-foreground);
     --color-muted: var(--muted);
@@ -223,6 +281,9 @@ body {
     --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
     --color-sidebar-accent: var(--sidebar-accent);
     --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+    --color-sidebar-card-bg: var(--sidebar-card-bg);
+    --color-sidebar-active-highlight: var(--sidebar-active-highlight);
+    --color-sidebar-text-dim: var(--sidebar-text-dim);
     --color-sidebar-border: var(--sidebar-border);
     --color-sidebar-ring: var(--sidebar-ring);
     --color-sidebar-gradient-from: var(--sidebar-gradient-from);
@@ -233,6 +294,17 @@ body {
     --color-table-header-bg: var(--table-header-bg);
     --color-table-header-text: var(--table-header-text);
     --color-table-border-strong: var(--table-border-strong);
+    --color-table-row-hover: var(--table-row-hover);
+
+    --color-card-accent-teal: var(--card-accent-teal);
+    --color-card-accent-green: var(--card-accent-green);
+    --color-card-accent-amber: var(--card-accent-amber);
+    --color-card-accent-red: var(--card-accent-red);
+    --color-card-accent-slate: var(--card-accent-slate);
+    --color-card-accent-violet: var(--card-accent-violet);
+
+    --color-sidebar-active-indicator: var(--sidebar-active-indicator);
+    --color-sidebar-admin-active-indicator: var(--sidebar-admin-active-indicator);
 
     --color-meter-track: var(--meter-track);
     --color-meter-safe: var(--meter-safe);
@@ -277,6 +349,33 @@ body {
     --color-teal-800: #115e59;
     --color-teal-900: #134e4a;
 
+    --color-cream-50: var(--color-cream-50);
+    --color-cream-100: var(--color-cream-100);
+    --color-cream-200: var(--color-cream-200);
+    --color-charcoal-950: var(--color-charcoal-950);
+    --color-charcoal-900: var(--color-charcoal-900);
+    --color-charcoal-800: var(--color-charcoal-800);
+    --color-accent-50: var(--color-accent-50);
+    --color-accent-500: var(--color-accent-500);
+    --color-accent-600: var(--color-accent-600);
+    --color-ink-900: var(--color-ink-900);
+    --color-ink-600: var(--color-ink-600);
+    --color-ink-400: var(--color-ink-400);
+    --color-ink-300: var(--color-ink-300);
+
+    --color-tile-purple-bg: var(--tile-purple-bg);
+    --color-tile-purple-fg: var(--tile-purple-fg);
+    --color-tile-peach-bg: var(--tile-peach-bg);
+    --color-tile-peach-fg: var(--tile-peach-fg);
+    --color-tile-blue-bg: var(--tile-blue-bg);
+    --color-tile-blue-fg: var(--tile-blue-fg);
+    --color-tile-mint-bg: var(--tile-mint-bg);
+    --color-tile-mint-fg: var(--tile-mint-fg);
+    --color-tile-teal-bg: var(--tile-teal-bg);
+    --color-tile-teal-fg: var(--tile-teal-fg);
+    --color-tile-gold-bg: var(--tile-gold-bg);
+    --color-tile-gold-fg: var(--tile-gold-fg);
+
     --size-badge-height: var(--badge-height);
 
     /* ── Font families ───────────────────────────────────────── */
@@ -308,6 +407,8 @@ body {
     --font-weight-extrabold: 800;
 
     --shadow-sm: var(--shadow-card);
+    --shadow-card: var(--shadow-card);
+    --shadow-card-hover: var(--shadow-card-hover);
 
     --scrollbar-thumb: #cbd5e1;
     --scrollbar-thumb-hover: #94a3b8;

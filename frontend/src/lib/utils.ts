@@ -82,6 +82,29 @@ export const formatDate = (value: string | Date | null | undefined): string => {
     return new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short', day: '2-digit' }).format(date);
 };
 
+const RELATIVE_TIME_UNITS: [Intl.RelativeTimeFormatUnit, number][] = [
+    ['year', 60 * 60 * 24 * 365],
+    ['month', 60 * 60 * 24 * 30],
+    ['day', 60 * 60 * 24],
+    ['hour', 60 * 60],
+    ['minute', 60],
+];
+
+/** Coarse relative time ("4 hours ago") — no library, minute-granularity is enough for activity subtitles. */
+export const formatRelativeTime = (value: string | Date | null | undefined): string => {
+    if (!value) return '—';
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return '—';
+
+    const seconds = Math.round((date.getTime() - Date.now()) / 1000);
+    const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
+
+    for (const [unit, unitSeconds] of RELATIVE_TIME_UNITS) {
+        if (Math.abs(seconds) >= unitSeconds) return formatter.format(Math.round(seconds / unitSeconds), unit);
+    }
+    return formatter.format(Math.round(seconds / 60), 'minute');
+};
+
 export const getInitials = (first?: string | null, last?: string | null): string => {
     const a = first?.trim()?.[0] ?? '';
     const b = last?.trim()?.[0] ?? '';

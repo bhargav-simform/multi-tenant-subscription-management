@@ -39,15 +39,20 @@ export function SidebarNav({ items }: { items: NavItem[] }) {
                     to={to}
                     className={({ isActive }) =>
                         cn(
-                            'flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
-                            'text-sidebar-foreground/80 hover:bg-white/10 hover:text-sidebar-foreground',
+                            'relative flex items-center gap-3 rounded-xl px-3 py-2 text-sm font-medium whitespace-nowrap transition-colors',
+                            'text-sidebar-foreground/80 hover:bg-sidebar-active-highlight/60 hover:text-sidebar-foreground',
                             'focus-visible:ring-2 focus-visible:ring-sidebar-ring focus-visible:outline-none',
-                            isActive && 'bg-white/15 text-sidebar-foreground',
+                            isActive &&
+                                cn(
+                                    'bg-sidebar-active-highlight text-sidebar-foreground',
+                                    'before:absolute before:top-1/2 before:left-0 before:h-5 before:w-1 before:-translate-y-1/2',
+                                    'before:rounded-r-full before:bg-(--sidebar-active-indicator-color)',
+                                ),
                         )
                     }
                 >
                     <Icon className="size-4 shrink-0" />
-                    <span className="truncate">{label}</span>
+                    <span>{label}</span>
                 </NavLink>
             ))}
         </nav>

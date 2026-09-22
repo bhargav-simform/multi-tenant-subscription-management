@@ -1,6 +1,7 @@
 import { DataSource } from 'typeorm';
 import { CreateResourcesAndPlanLimitCache1700000000001 } from './migrations/1700000000001-CreateResourcesAndPlanLimitCache';
 import { CreateConsumedEvents1700000000002 } from './migrations/1700000000002-CreateConsumedEvents';
+import { AddResourceSizeIndex1700000000003 } from './migrations/1700000000003-AddResourceSizeIndex';
 
 /** §27.3 / §22.1 — see apps/tenant-service/src/database/data-source.ts for the
  * full rationale. resource_db is owned outright by this service, so its
@@ -17,6 +18,7 @@ export default new DataSource({
   migrations: [
     CreateResourcesAndPlanLimitCache1700000000001,
     CreateConsumedEvents1700000000002,
+    AddResourceSizeIndex1700000000003,
   ],
   migrationsTableName: 'resource_service_migrations',
   synchronize: false,

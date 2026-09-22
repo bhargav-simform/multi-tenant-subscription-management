@@ -34,7 +34,7 @@ export default function PlanPage() {
                 <p className="text-sm text-muted-foreground">{LABELS.PLAN.SUBTITLE}</p>
             </div>
 
-            <Card>
+            <Card accent="violet">
                 <CardHeader>
                     <CardDescription>{LABELS.PLAN.CURRENT_PLAN}</CardDescription>
                     <CardTitle className="flex items-center gap-2 text-2xl">

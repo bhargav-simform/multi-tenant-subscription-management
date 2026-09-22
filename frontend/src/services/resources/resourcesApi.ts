@@ -1,9 +1,9 @@
 import { ENDPOINTS } from '@/constants/endpoints';
 import api from '@/services/api';
-import type { CreateResourceRequest, CursorPage, CursorQuery, Resource } from '@/types/api';
+import type { CreateResourceRequest, CursorPage, Resource, ResourcesQuery } from '@/types/api';
 
 export const resourcesApi = {
-    list: async (query: CursorQuery = {}): Promise<CursorPage<Resource>> => {
+    list: async (query: ResourcesQuery = {}): Promise<CursorPage<Resource>> => {
         const { data } = await api.get<CursorPage<Resource>>(ENDPOINTS.RESOURCES.LIST, { params: query });
         return data;
     },

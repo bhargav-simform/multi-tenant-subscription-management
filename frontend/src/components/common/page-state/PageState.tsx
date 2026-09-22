@@ -1,7 +1,9 @@
 import type { ReactNode } from 'react';
 import { AlertCircleIcon, InboxIcon, Loader2Icon, SearchXIcon } from 'lucide-react';
 
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
+import { Skeleton } from '@/components/ui/skeleton';
 import { LABELS } from '@/constants/labels';
 import { cn } from '@/lib/utils';
 
@@ -28,7 +30,33 @@ function StateShell({ icon, title, body, action, className }: StateShellProps) {
     );
 }
 
-export function PageLoadingState({ className }: { className?: string | undefined }) {
+export function PageLoadingState({
+    className,
+    variant = 'spinner',
+    skeletonRows = 3,
+}: {
+    className?: string | undefined;
+    /** 'skeleton' renders content-shaped placeholder blocks instead of a spinner — use for card-grid pages. */
+    variant?: 'spinner' | 'skeleton';
+    skeletonRows?: number;
+}) {
+    if (variant === 'skeleton') {
+        return (
+            <div role="status" aria-live="polite" className={cn('flex flex-col gap-4', className)}>
+                <span className="sr-only">{LABELS.COMMON.LOADING}</span>
+                {Array.from({ length: skeletonRows }, (_, index) => (
+                    <div key={index} className="flex items-center gap-3 rounded-xl border border-border/60 bg-card p-4 shadow-card">
+                        <Skeleton className="size-10 shrink-0 rounded-lg" />
+                        <div className="flex min-w-0 flex-1 flex-col gap-2">
+                            <Skeleton className="h-3 w-24" />
+                            <Skeleton className="h-5 w-32" />
+                        </div>
+                    </div>
+                ))}
+            </div>
+        );
+    }
+
     return (
         <div
             role="status"
@@ -60,26 +88,36 @@ export function PageErrorState({
     body,
     onRetry,
     className,
+    variant = 'shell',
 }: {
     title?: string | undefined;
     body?: string | undefined;
     onRetry?: (() => void) | undefined;
     className?: string | undefined;
+    /** 'inline' renders a persistent Alert banner in place, for errors that sit alongside still-visible content. */
+    variant?: 'shell' | 'inline';
 }) {
+    const retryAction = onRetry ? (
+        <Button variant="outline" size="sm" onClick={onRetry}>
+            {LABELS.COMMON.RETRY}
+        </Button>
+    ) : undefined;
+
+    if (variant === 'inline') {
+        return (
+            <Alert tone="red" className={className}>
+                <AlertCircleIcon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+                <div className="flex flex-1 flex-col gap-2">
+                    <AlertTitle>{title}</AlertTitle>
+                    {body && <AlertDescription>{body}</AlertDescription>}
+                    {retryAction}
+                </div>
+            </Alert>
+        );
+    }
+
     return (
-        <StateShell
-            icon={<AlertCircleIcon className="size-8" />}
-            title={title}
-            body={body}
-            className={className}
-            action={
-                onRetry ? (
-                    <Button variant="outline" size="sm" onClick={onRetry}>
-                        {LABELS.COMMON.RETRY}
-                    </Button>
-                ) : undefined
-            }
-        />
+        <StateShell icon={<AlertCircleIcon className="size-8" />} title={title} body={body} className={className} action={retryAction} />
     );
 }
 

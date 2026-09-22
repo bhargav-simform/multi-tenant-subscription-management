@@ -3,7 +3,7 @@ import { TenantAwareDataSource } from '@app/database';
 import { TenantContextStore } from '@app/tenant-context';
 import { EventPublisher, type DomainEvent } from '@app/kafka';
 import { EVENT_TYPES, KAFKA_TOPICS, PlanLimitExceededException, Role } from '@app/common';
-import type { CursorPage, CursorQuery } from '@app/common';
+import type { CursorPage } from '@app/common';
 import { Resource } from './resource.entity';
 import {
   RESOURCE_REPOSITORY,
@@ -15,6 +15,7 @@ import {
   type IPlanLimitCacheRepository,
 } from './plan-limit-cache.repository.interface';
 import type { CreateResourceDto } from './dto/create-resource.dto';
+import type { ListResourcesQueryDto } from './dto/list-resources-query.dto';
 import type { ResourceResponseDto } from './dto/resource-response.dto';
 
 /**
@@ -162,7 +163,7 @@ export class ResourcesService {
   }
 
   /** §29: thin wrapper — keyset pagination, RLS-scoped via a transaction. */
-  async listPage(query: CursorQuery): Promise<CursorPage<ResourceResponseDto>> {
+  async listPage(query: ListResourcesQueryDto): Promise<CursorPage<ResourceResponseDto>> {
     const page = await this.tenantDataSource.transaction((manager) =>
       this.resources.listPage(query, manager),
     );

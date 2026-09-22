@@ -1,14 +1,21 @@
 import { Injectable } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
-import type { CursorPage, CursorQuery } from '@app/common';
+import type { CursorPage } from '@app/common';
 import { TenantContextStore } from '@app/tenant-context';
 import { TenantRepository } from '@app/database';
 import { Resource } from './resource.entity';
+import { RESOURCE_SORT, type ListResourcesQueryDto } from './dto/list-resources-query.dto';
 import type {
   CreateResourceData,
   IResourceRepository,
   RawResourceRow,
 } from './resource.repository.interface';
+
+/** The DB column each sort mode orders and cursors by — id is always the tiebreaker. */
+const SORT_COLUMN: Record<string, string> = {
+  [RESOURCE_SORT.CREATED_AT]: 'createdAt',
+  [RESOURCE_SORT.SIZE_BYTES]: 'sizeBytes',
+};
 
 const DEFAULT_PAGE_SIZE = 20;
 
@@ -51,21 +58,40 @@ export class ResourceRepository extends TenantRepository<Resource> implements IR
       .findOne({ where: { id, organizationId: this.organizationId } });
   }
 
-  /** §29: keyset pagination on (created_at DESC, id) — never OFFSET. */
-  async listPage(query: CursorQuery, manager: EntityManager): Promise<CursorPage<Resource>> {
+  /**
+   * §29: keyset pagination — never OFFSET. Orders by `query.sort` (default
+   * createdAt) DESC, then id DESC as a tiebreaker. The cursor encodes
+   * (sortColumnValue, id) for WHICHEVER column is active — switching sort
+   * mid-session means starting a fresh cursor, since a cursor minted under one
+   * ordering has no meaning under another; the frontend resets pagination
+   * whenever the active sort/filter changes, so this never sees a cursor
+   * encoded for a different sort than the one it was given.
+   */
+  async listPage(query: ListResourcesQueryDto, manager: EntityManager): Promise<CursorPage<Resource>> {
     const limit = Math.min(query.limit ?? DEFAULT_PAGE_SIZE, 100);
+    const sortColumn = SORT_COLUMN[query.sort ?? RESOURCE_SORT.CREATED_AT];
+
     const qb = manager
       .getRepository(Resource)
       .createQueryBuilder('r')
       .where('r.organizationId = :organizationId', { organizationId: this.organizationId })
-      .orderBy('r.createdAt', 'DESC')
+      .orderBy(`r.${sortColumn}`, 'DESC')
       .addOrderBy('r.id', 'DESC')
       .take(limit + 1);
 
+    // Server-side only, never a client-side filter over one already-loaded
+    // page — this list is keyset paginated, so filtering only the current
+    // page would silently hide matches sitting on pages not yet fetched.
+    if (query.hasDescription === 'false') {
+      qb.andWhere('(r.description IS NULL OR r.description = :empty)', { empty: '' });
+    } else if (query.hasDescription === 'true') {
+      qb.andWhere('r.description IS NOT NULL').andWhere("r.description != ''");
+    }
+
     if (query.cursor) {
-      const [cursorCreatedAt, cursorId] = decodeCursor(query.cursor);
-      qb.andWhere('(r.createdAt, r.id) < (:cursorCreatedAt, :cursorId)', {
-        cursorCreatedAt,
+      const [cursorSortValue, cursorId] = decodeCursor(query.cursor);
+      qb.andWhere(`(r.${sortColumn}, r.id) < (:cursorSortValue, :cursorId)`, {
+        cursorSortValue,
         cursorId,
       });
     }
@@ -78,7 +104,7 @@ export class ResourceRepository extends TenantRepository<Resource> implements IR
     return {
       items,
       hasMore,
-      nextCursor: hasMore && last ? encodeCursor(last.createdAt, last.id) : null,
+      nextCursor: hasMore && last ? encodeCursor(sortColumnValue(last, sortColumn), last.id) : null,
     };
   }
 
@@ -154,11 +180,17 @@ export class ResourceRepository extends TenantRepository<Resource> implements IR
   }
 }
 
-function encodeCursor(createdAt: Date, id: string): string {
-  return Buffer.from(`${createdAt.toISOString()}|${id}`).toString('base64url');
+/** The active sort column's value off a row, stringified the same way for both a Date (createdAt) and a number (sizeBytes). */
+function sortColumnValue(row: Resource, column: string): string {
+  const value = (row as unknown as Record<string, unknown>)[column];
+  return value instanceof Date ? value.toISOString() : String(value);
+}
+
+function encodeCursor(sortValue: string, id: string): string {
+  return Buffer.from(`${sortValue}|${id}`).toString('base64url');
 }
 
 function decodeCursor(cursor: string): [string, string] {
-  const [createdAt, id] = Buffer.from(cursor, 'base64url').toString('utf8').split('|');
-  return [createdAt, id];
+  const [sortValue, id] = Buffer.from(cursor, 'base64url').toString('utf8').split('|');
+  return [sortValue, id];
 }

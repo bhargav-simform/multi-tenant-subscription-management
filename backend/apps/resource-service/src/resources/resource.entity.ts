@@ -23,6 +23,7 @@ import { TenantBaseEntity, bigintTransformer } from '@app/database';
  */
 @Entity('resources')
 @Index(['organizationId', 'createdAt', 'id'])
+@Index(['organizationId', 'sizeBytes', 'id'])
 export class Resource extends TenantBaseEntity {
   @Column({ type: 'varchar', length: 255 })
   name!: string;

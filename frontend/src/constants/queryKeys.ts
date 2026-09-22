@@ -25,7 +25,8 @@ export const QUERY_KEYS = {
     },
     RESOURCES: {
         ALL: ['resources'] as const,
-        LIST: (cursor?: string, limit?: number) => ['resources', 'list', { cursor, limit }] as const,
+        LIST: (cursor?: string, limit?: number, sort?: string, hasDescription?: string) =>
+            ['resources', 'list', { cursor, limit, sort, hasDescription }] as const,
         DETAIL: (id: string) => ['resources', 'detail', id] as const,
     },
     SUBSCRIPTION: {

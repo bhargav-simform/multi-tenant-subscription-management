@@ -1,5 +1,6 @@
 import { LogOutIcon } from 'lucide-react';
 
+import { Avatar } from '@/components/common/avatar';
 import { Button } from '@/components/ui/button';
 import {
     DropdownMenu,
@@ -31,9 +32,7 @@ export function UserMenu() {
         <DropdownMenu>
             <DropdownMenuTrigger asChild>
                 <Button variant="ghost" size="icon" className="rounded-full" aria-label={user.email}>
-                    <span className="flex size-8 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
-                        {initials}
-                    </span>
+                    <Avatar seed={user.email} initials={initials} />
                 </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-64">

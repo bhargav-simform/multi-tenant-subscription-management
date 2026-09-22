@@ -2,8 +2,10 @@ import { useMemo, useState } from 'react';
 import type { ColumnDef } from '@tanstack/react-table';
 import { PlusIcon, Trash2Icon } from 'lucide-react';
 
+import { Avatar } from '@/components/common/avatar';
 import { ConfirmDialog } from '@/components/common/confirm-dialog';
 import { DataTable, useCursorPagination } from '@/components/common/data-table';
+import { useSetSearchPlaceholder } from '@/components/common/page-header';
 import { StatusBadge, type BadgeTone } from '@/components/common/status-badge';
 import { UsageMeter } from '@/components/common/usage-meter';
 import { Button } from '@/components/ui/button';
@@ -63,6 +65,7 @@ export default function UsersPage() {
     const { mutate: updateRole } = useUpdateUserRole();
     const { mutate: removeUser, isPending: isRemoving } = useRemoveUser();
     const { mutate: revokeInvitation, isPending: isRevoking } = useRevokeInvitation();
+    useSetSearchPlaceholder(LABELS.SIDEBAR.SEARCH_PLACEHOLDER_USERS);
 
     const [isInviteOpen, setInviteOpen] = useState(false);
     const [pendingRemove, setPendingRemove] = useState<UserRow | null>(null);
@@ -81,10 +84,20 @@ export default function UsersPage() {
                 header: LABELS.USERS.NAME,
                 cell: ({ row }) => {
                     if (row.original.kind === 'invitation') {
-                        return <span className="text-muted-foreground">{LABELS.COMMON.NO_DATA}</span>;
+                        return (
+                            <div className="flex items-center gap-3">
+                                <Avatar seed={row.original.email} initials="?" />
+                                <span className="text-muted-foreground">{LABELS.COMMON.NO_DATA}</span>
+                            </div>
+                        );
                     }
                     const name = fullName(row.original.firstName, row.original.lastName);
-                    return <span className="font-medium">{name || LABELS.COMMON.NO_DATA}</span>;
+                    return (
+                        <div className="flex items-center gap-3">
+                            <Avatar seed={row.original.email} initials={row.original.email.slice(0, 2).toUpperCase()} />
+                            <span className="font-medium">{name || LABELS.COMMON.NO_DATA}</span>
+                        </div>
+                    );
                 },
             },
             { accessorKey: 'email', header: LABELS.USERS.EMAIL },

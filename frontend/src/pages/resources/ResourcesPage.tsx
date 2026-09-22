@@ -5,21 +5,40 @@ import { PlusIcon, Trash2Icon } from 'lucide-react';
 
 import { ConfirmDialog } from '@/components/common/confirm-dialog';
 import { DataTable, useCursorPagination } from '@/components/common/data-table';
+import { FileTypeTile } from '@/components/common/file-type-tile';
+import { FilterChipGroup } from '@/components/common/filter-chip-group';
+import { useSetSearchPlaceholder } from '@/components/common/page-header';
 import { Button } from '@/components/ui/button';
 import { LABELS } from '@/constants/labels';
 import { buildRoute } from '@/constants/routes';
 import { useDeleteResource } from '@/hooks/resources/mutations';
 import { useResources } from '@/hooks/resources/queries';
 import { formatBytes, formatDateTime, interpolate } from '@/lib/utils';
-import type { Resource } from '@/types/api';
+import { RESOURCE_SORT, type Resource, type ResourceSort } from '@/types/api';
 
 import { ResourceFormDialog } from './ResourceFormDialog';
+
+/** Each chip maps to a real server-side sort/filter param — see useResources. */
+const FILTER_CHIPS: { id: string; label: string; sort?: ResourceSort; hasDescription?: 'true' | 'false' }[] = [
+    { id: 'all', label: 'All files' },
+    { id: 'largest', label: 'Largest first', sort: RESOURCE_SORT.SIZE_BYTES },
+    { id: 'recent', label: 'Recently added', sort: RESOURCE_SORT.CREATED_AT },
+    { id: 'no-description', label: 'No description', hasDescription: 'false' },
+];
 
 export default function ResourcesPage() {
     const navigate = useNavigate();
     const { cursor, canGoPrevious, goNext, goPrevious, reset } = useCursorPagination();
-    const { data, isLoading, isError, isFetching, refetch } = useResources(cursor);
+    const [activeFilterId, setActiveFilterId] = useState('all');
+    const activeFilter = FILTER_CHIPS.find((chip) => chip.id === activeFilterId);
+    const { data, isLoading, isError, isFetching, refetch } = useResources(
+        cursor,
+        undefined,
+        activeFilter?.sort,
+        activeFilter?.hasDescription,
+    );
     const { mutate: deleteResource, isPending: isDeleting } = useDeleteResource();
+    useSetSearchPlaceholder(LABELS.SIDEBAR.SEARCH_PLACEHOLDER_RESOURCES);
 
     const [isCreateOpen, setCreateOpen] = useState(false);
     const [pendingDelete, setPendingDelete] = useState<Resource | null>(null);
@@ -29,7 +48,12 @@ export default function ResourcesPage() {
             {
                 accessorKey: 'name',
                 header: LABELS.RESOURCES.NAME,
-                cell: ({ row }) => <span className="font-medium">{row.original.name}</span>,
+                cell: ({ row }) => (
+                    <div className="flex items-center gap-3">
+                        <FileTypeTile resource={row.original} />
+                        <span className="font-medium">{row.original.name}</span>
+                    </div>
+                ),
             },
             {
                 accessorKey: 'description',
@@ -86,6 +110,17 @@ export default function ResourcesPage() {
                     {LABELS.RESOURCES.CREATE}
                 </Button>
             </div>
+
+            <FilterChipGroup
+                chips={FILTER_CHIPS}
+                activeId={activeFilterId}
+                onChange={(id) => {
+                    setActiveFilterId(id);
+                    // A cursor minted under one sort/filter has no meaning under
+                    // another — start a fresh page whenever the active filter changes.
+                    reset();
+                }}
+            />
 
             <DataTable
                 columns={columns}

@@ -1,6 +1,7 @@
 import { Link, useParams } from 'react-router-dom';
 import { ArrowLeftIcon } from 'lucide-react';
 
+import { useSetPageTitle } from '@/components/common/page-header';
 import { PageErrorState, PageLoadingState, PageNotFoundState } from '@/components/common/page-state';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -25,6 +26,8 @@ import { formatBytes, formatDateTime, getErrorStatus } from '@/lib/utils';
 export default function ResourceDetailPage() {
     const { id } = useParams<{ id: string }>();
     const { data: resource, isLoading, isError, error, refetch } = useResource(id);
+
+    useSetPageTitle(resource?.name);
 
     const backLink = (
         <Button variant="outline" size="sm" asChild>

@@ -1,12 +1,26 @@
 import * as React from 'react';
 
 import { cn } from '@/lib/utils';
+import type { BadgeTone } from '@/components/common/status-badge';
 
-function Card({ className, ...props }: React.ComponentProps<'div'>) {
+const ACCENT_CLASS: Record<BadgeTone, string> = {
+    teal: 'border-l-card-accent-teal',
+    green: 'border-l-card-accent-green',
+    amber: 'border-l-card-accent-amber',
+    red: 'border-l-card-accent-red',
+    slate: 'border-l-card-accent-slate',
+    violet: 'border-l-card-accent-violet',
+};
+
+function Card({ className, accent, ...props }: React.ComponentProps<'div'> & { accent?: BadgeTone }) {
     return (
         <div
             data-slot="card"
-            className={cn('flex flex-col gap-6 rounded-xl border bg-card py-6 text-card-foreground shadow-sm', className)}
+            className={cn(
+                'flex flex-col gap-6 rounded-2xl border border-border/60 bg-card py-6 text-card-foreground shadow-card',
+                accent && ['border-l-4', ACCENT_CLASS[accent]],
+                className,
+            )}
             {...props}
         />
     );

@@ -183,3 +183,16 @@ export interface CursorQuery {
     cursor?: string;
     limit?: number;
 }
+
+export const RESOURCE_SORT = {
+    CREATED_AT: 'createdAt',
+    SIZE_BYTES: 'sizeBytes',
+} as const;
+
+export type ResourceSort = (typeof RESOURCE_SORT)[keyof typeof RESOURCE_SORT];
+
+/** Matches resource-service's ListResourcesQueryDto — sort and hasDescription are server-side filters, not client-side ones. */
+export interface ResourcesQuery extends CursorQuery {
+    sort?: ResourceSort;
+    hasDescription?: 'true' | 'false';
+}

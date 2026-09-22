@@ -193,4 +193,22 @@ export const LABELS = {
         NOT_FOUND_BODY: 'That page does not exist.',
         BACK_HOME: 'Back to dashboard',
     },
+    SIDEBAR: {
+        STORAGE_ALMOST_FULL_TITLE: 'Storage almost full',
+        STORAGE_ALMOST_FULL_BODY: "You're using {used} of {max}. Upgrade to keep uploading.",
+        UPGRADE_PLAN: 'Upgrade plan',
+        SEARCH_PLACEHOLDER_USERS: 'Search people…',
+        SEARCH_PLACEHOLDER_RESOURCES: 'Search resources…',
+        SEARCH_PLACEHOLDER_DASHBOARD: 'Search resources, people…',
+    },
+    QUICK_ACTIONS: {
+        TITLE: 'Quick actions',
+        INVITE_USER: 'Invite a user',
+        INVITE_USER_SUBTITLE: '{count} seats remaining',
+        UPLOAD_RESOURCE: 'Upload a resource',
+        UPLOAD_RESOURCE_SUBTITLE_FULL: 'Storage nearly full',
+        UPLOAD_RESOURCE_SUBTITLE_OK: '{used} used',
+        REVIEW_AUDIT: 'Review audit log',
+        REVIEW_AUDIT_SUBTITLE: 'View recent activity',
+    },
 } as const;

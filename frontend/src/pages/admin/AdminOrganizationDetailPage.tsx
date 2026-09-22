@@ -1,6 +1,7 @@
 import { Link, useParams } from 'react-router-dom';
 import { ArrowLeftIcon } from 'lucide-react';
 
+import { useSetPageTitle } from '@/components/common/page-header';
 import { PageErrorState, PageLoadingState, PageNotFoundState } from '@/components/common/page-state';
 import { StatusBadge } from '@/components/common/status-badge';
 import { UsageMeter } from '@/components/common/usage-meter';
@@ -24,6 +25,8 @@ export default function AdminOrganizationDetailPage() {
     const { id } = useParams<{ id: string }>();
     const { data: organization, isLoading, isError, refetch } = useAdminOrganization(id);
     const { data: usage } = useAdminUsage(id);
+
+    useSetPageTitle(organization?.name);
 
     const entry = usage?.[0];
 

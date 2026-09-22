@@ -1,8 +1,9 @@
 import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from '@tanstack/react-table';
 import { ChevronLeftIcon, ChevronRightIcon } from 'lucide-react';
 
-import { PageEmptyState, PageErrorState, PageLoadingState } from '@/components/common/page-state';
+import { PageEmptyState, PageErrorState } from '@/components/common/page-state';
 import { Button } from '@/components/ui/button';
+import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { LABELS } from '@/constants/labels';
 import { cn } from '@/lib/utils';
@@ -19,7 +20,12 @@ export interface DataTableProps<TData, TValue> {
     /** Keyset pagination controls. Omit for a list that never pages. */
     pagination?: CursorPaginationProps;
     className?: string;
+    /** Number of placeholder rows to render while `isLoading` is true. */
+    skeletonRows?: number;
 }
+
+/** Staggered widths so skeleton cells don't read as one uniform grey bar. */
+const SKELETON_WIDTHS = ['w-3/5', 'w-2/5', 'w-1/3', 'w-1/4', 'w-1/2'];
 
 export interface CursorPaginationProps {
     canGoPrevious: boolean;
@@ -49,6 +55,7 @@ export function DataTable<TData, TValue>({
     onRowClick,
     pagination,
     className,
+    skeletonRows = 5,
 }: DataTableProps<TData, TValue>) {
     const table = useReactTable({
         data,
@@ -60,18 +67,20 @@ export function DataTable<TData, TValue>({
         manualFiltering: true,
     });
 
-    if (isLoading) return <PageLoadingState />;
     if (isError) return <PageErrorState onRetry={onRetry} />;
-    if (data.length === 0) return <PageEmptyState body={emptyMessage} action={emptyAction} />;
+    if (!isLoading && data.length === 0) return <PageEmptyState body={emptyMessage} action={emptyAction} />;
+
+    const headerGroups = table.getHeaderGroups();
+    const columnCount = headerGroups[0]?.headers.length ?? columns.length;
 
     return (
         <div className={cn('flex flex-col gap-3', className)}>
-            <div className="overflow-hidden rounded-lg border border-border bg-card shadow-sm">
+            <div className="overflow-hidden rounded-2xl border border-border/60 bg-card shadow-card">
                 <div className="overflow-x-auto">
                     <Table>
                         <TableHeader className="bg-table-header-bg">
-                            {table.getHeaderGroups().map((headerGroup) => (
-                                <TableRow key={headerGroup.id} className="hover:bg-transparent">
+                            {headerGroups.map((headerGroup) => (
+                                <TableRow key={headerGroup.id} className="border-b border-border hover:bg-transparent">
                                     {headerGroup.headers.map((header) => (
                                         <TableHead
                                             key={header.id}
@@ -87,38 +96,53 @@ export function DataTable<TData, TValue>({
                             ))}
                         </TableHeader>
                         <TableBody>
-                            {table.getRowModel().rows.map((row) => (
-                                <TableRow
-                                    key={row.id}
-                                    onClick={onRowClick ? () => onRowClick(row.original) : undefined}
-                                    // A clickable row is reachable by keyboard too, not only by mouse.
-                                    tabIndex={onRowClick ? 0 : undefined}
-                                    role={onRowClick ? 'button' : undefined}
-                                    onKeyDown={
-                                        onRowClick
-                                            ? (event) => {
-                                                  if (event.key === 'Enter' || event.key === ' ') {
-                                                      event.preventDefault();
-                                                      onRowClick(row.original);
-                                                  }
-                                              }
-                                            : undefined
-                                    }
-                                    className={cn(onRowClick && 'cursor-pointer focus-visible:bg-accent focus-visible:outline-none')}
-                                >
-                                    {row.getVisibleCells().map((cell) => (
-                                        <TableCell key={cell.id}>
-                                            {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                                        </TableCell>
-                                    ))}
-                                </TableRow>
-                            ))}
+                            {isLoading
+                                ? Array.from({ length: skeletonRows }, (_, rowIndex) => (
+                                      <TableRow key={`skeleton-${rowIndex}`} className="hover:bg-transparent">
+                                          {Array.from({ length: columnCount }, (_, colIndex) => (
+                                              <TableCell key={colIndex}>
+                                                  <Skeleton
+                                                      className={cn('h-4', SKELETON_WIDTHS[colIndex % SKELETON_WIDTHS.length])}
+                                                  />
+                                              </TableCell>
+                                          ))}
+                                      </TableRow>
+                                  ))
+                                : table.getRowModel().rows.map((row) => (
+                                      <TableRow
+                                          key={row.id}
+                                          onClick={onRowClick ? () => onRowClick(row.original) : undefined}
+                                          // A clickable row is reachable by keyboard too, not only by mouse.
+                                          tabIndex={onRowClick ? 0 : undefined}
+                                          role={onRowClick ? 'button' : undefined}
+                                          onKeyDown={
+                                              onRowClick
+                                                  ? (event) => {
+                                                        if (event.key === 'Enter' || event.key === ' ') {
+                                                            event.preventDefault();
+                                                            onRowClick(row.original);
+                                                        }
+                                                    }
+                                                  : undefined
+                                          }
+                                          className={cn(
+                                              'hover:bg-table-row-hover transition-colors',
+                                              onRowClick && 'cursor-pointer focus-visible:bg-accent focus-visible:outline-none',
+                                          )}
+                                      >
+                                          {row.getVisibleCells().map((cell) => (
+                                              <TableCell key={cell.id}>
+                                                  {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                                              </TableCell>
+                                          ))}
+                                      </TableRow>
+                                  ))}
                         </TableBody>
                     </Table>
                 </div>
             </div>
 
-            {pagination && <CursorPagination {...pagination} />}
+            {pagination && !isLoading && <CursorPagination {...pagination} />}
         </div>
     );
 }

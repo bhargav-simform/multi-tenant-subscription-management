@@ -1,4 +1,4 @@
-import { USAGE_THRESHOLD } from '@/constants/plan';
+import { resolveRatio, resolveTone, type MeterTone } from '@/components/common/usage-meter/resolveMeterTone';
 import { cn } from '@/lib/utils';
 
 export interface UsageMeterProps {
@@ -10,8 +10,6 @@ export interface UsageMeterProps {
     className?: string;
 }
 
-type MeterTone = 'safe' | 'warn' | 'full';
-
 const TONE_CLASS: Record<MeterTone, string> = {
     safe: 'bg-meter-safe',
     warn: 'bg-meter-warn',
@@ -22,21 +20,6 @@ const TONE_TEXT: Record<MeterTone, string> = {
     safe: 'text-muted-foreground',
     warn: 'text-badge-amber-text',
     full: 'text-badge-red-text',
-};
-
-/**
- * `max` of 0 would divide by zero; an unlimited-looking plan is shown as full
- * rather than as a silently empty bar.
- */
-const resolveRatio = (used: number, max: number): number => {
-    if (!Number.isFinite(used) || !Number.isFinite(max) || max <= 0) return 1;
-    return Math.max(0, used / max);
-};
-
-const resolveTone = (ratio: number): MeterTone => {
-    if (ratio >= USAGE_THRESHOLD.FULL) return 'full';
-    if (ratio >= USAGE_THRESHOLD.WARN) return 'warn';
-    return 'safe';
 };
 
 /**

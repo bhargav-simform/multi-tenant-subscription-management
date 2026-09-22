@@ -3,11 +3,30 @@ import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { PAGE_SIZE, QUERY_META, STALE_TIME } from '@/constants/common';
 import { QUERY_KEYS } from '@/constants/queryKeys';
 import { resourcesApi } from '@/services/resources/resourcesApi';
+import type { ResourceSort } from '@/types/api';
 
-export const useResources = (cursor?: string, limit: number = PAGE_SIZE.DEFAULT) =>
+/**
+ * `sort`/`hasDescription` are real, server-side keyset-pagination-aware
+ * params (resource-service's ListResourcesQueryDto) — never a client-side
+ * filter over one already-fetched page. The caller MUST reset `cursor` to
+ * undefined whenever sort/hasDescription changes, since a cursor minted under
+ * one ordering has no meaning under another.
+ */
+export const useResources = (
+    cursor?: string,
+    limit: number = PAGE_SIZE.DEFAULT,
+    sort?: ResourceSort,
+    hasDescription?: 'true' | 'false',
+) =>
     useQuery({
-        queryKey: QUERY_KEYS.RESOURCES.LIST(cursor, limit),
-        queryFn: () => resourcesApi.list({ ...(cursor ? { cursor } : {}), limit }),
+        queryKey: QUERY_KEYS.RESOURCES.LIST(cursor, limit, sort, hasDescription),
+        queryFn: () =>
+            resourcesApi.list({
+                ...(cursor ? { cursor } : {}),
+                limit,
+                ...(sort ? { sort } : {}),
+                ...(hasDescription ? { hasDescription } : {}),
+            }),
         staleTime: STALE_TIME.ONE_MINUTE,
         placeholderData: keepPreviousData,
     });

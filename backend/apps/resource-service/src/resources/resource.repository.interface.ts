@@ -1,6 +1,7 @@
 import type { EntityManager } from 'typeorm';
-import type { CursorPage, CursorQuery } from '@app/common';
+import type { CursorPage } from '@app/common';
 import type { Resource } from './resource.entity';
+import type { ListResourcesQueryDto } from './dto/list-resources-query.dto';
 
 export const RESOURCE_REPOSITORY = Symbol('RESOURCE_REPOSITORY');
 
@@ -44,8 +45,12 @@ export interface IResourceRepository {
   /** §13, H1: the cross-tenant read-by-id target. RLS-scoped; a foreign id yields null. */
   findById(id: string, manager: EntityManager): Promise<Resource | null>;
 
-  /** §29: keyset pagination on (created_at DESC, id) — never OFFSET. */
-  listPage(query: CursorQuery, manager: EntityManager): Promise<CursorPage<Resource>>;
+  /**
+   * §29: keyset pagination — never OFFSET. Orders by `query.sort` (default
+   * createdAt) DESC, then id DESC as a tiebreaker; the cursor tuple matches
+   * whichever column is active.
+   */
+  listPage(query: ListResourcesQueryDto, manager: EntityManager): Promise<CursorPage<Resource>>;
 
   /**
    * §19.4 "drift detection": recomputes the true total from the rows
