@@ -13,30 +13,31 @@ Reference: `docs/architecture/ARCHITECTURE.md` §28.
 
 ## Levels
 
-| Level | Tool | Scope |
-|---|---|---|
-| Unit | Jest + `@nestjs/testing` | Domain logic, ability factories, in-memory repos. No I/O |
-| Integration | Jest + **Testcontainers** | Real Postgres: RLS, locks, constraints, migrations |
-| Contract | Jest | Event envelope shapes producer ↔ consumer |
-| E2E | Jest + supertest | Full flows through the gateway |
-| Frontend | **Vitest + RTL** | Components, hooks, forms |
+| Level | Where | Tool | Scope | Run |
+|---|---|---|---|---|
+| Unit | `backend/tests/unit/` | Jest + ts-jest | Services, handlers, CASL, middleware — models, `lib/events`, `lib/prisma` mocked with `jest.mock`. No I/O | `pnpm test` |
+| Integration | `backend/tests/integration/` | Jest + **Testcontainers** | Real Postgres as `app_user`: RLS, locks, constraints, grants, SECURITY DEFINER functions, the migration itself | `pnpm test:integration` |
+| HTTP contract | `backend/tests/http/` | Jest + Supertest + Testcontainers | Black-box through `createApp()`: paths, statuses, bodies, headers — the frozen API contract | `pnpm test:integration` |
+| Frontend | `frontend/` | **Vitest + RTL** | Components, hooks, forms | see frontend README |
 
 **Testcontainers is non-negotiable for integration.** RLS policies, `FOR UPDATE`
-blocking and `CHECK` constraints are PostgreSQL behaviours. A mocked repository
+blocking and `CHECK` constraints are PostgreSQL behaviours. A mocked model
 proves nothing about them — it tests the mock. Verify this yourself once per
-lock: temporarily remove the `.setLock(...)` (or the `FOR UPDATE` SQL) and
-confirm your integration test fails while your unit test does not. A
-concurrency unit test with an in-memory fake that serialises every call
-unconditionally will pass even with the lock deleted — this happened once
-already (`user-service`'s first pass) and was caught only by a review, not by
-CI.
+lock: temporarily remove the `FOR UPDATE` from the model's SQL and confirm your
+integration test fails while your unit test does not. A concurrency unit test
+with a mocked model will pass even with the lock deleted — this happened once
+already (the first seat-lock tests) and was caught only by a review, not by CI.
 
-**Use `test/integration/support/postgres-test-container.ts`** — the shared
-helper, not a new one per service. It creates the exact `app_migrator`/
-`app_user` roles `docker/postgres/init.sh` creates in production
-(`NOSUPERUSER`/`NOBYPASSRLS`, §13.5), runs your migration as `app_migrator`,
-and connects as `app_user`. `pnpm test:integration` runs this suite (real
-Docker, tens of seconds); `pnpm test` does not include it.
+**Use `backend/tests/support/postgres-test-container.ts`** (`PostgresTestContainer`)
+— the shared helper, not a new one per suite. It creates the exact
+`app_migrator` / `app_user` / `app_rls_bypass` roles `docker/postgres/init.sh`
+creates (`NOSUPERUSER`/`NOBYPASSRLS`, §13.5), applies the real migration SQL as
+`app_migrator`, and points the app's Prisma singleton at the database **as
+`app_user`** via `setPrisma()`. `asMigrator()` / `asSuperuser()` exist for
+seeding fixtures past RLS; `asAppUser()` for a "careless" raw query. It
+currently applies only `0001_init` — extend it when a migration is added.
+Integration suites need Docker and take tens of seconds; `pnpm test` does not
+include them.
 
 ## The four critical tests
 
@@ -52,8 +53,8 @@ Repeat for /users/:id, PATCH role, DELETE resource.
 
 **T2 — The careless query does not leak**
 ```
-A repository method with NO tenant filter, plus a raw-SQL variant:
-  dataSource.query('SELECT * FROM resources')
+A model function with NO tenant filter, plus a raw-SQL variant:
+  tx.$queryRaw`SELECT * FROM resources`   (resources.service findAllResourcesForReport)
 Seed 3 for Org A, 2 for Org B; run in Org A's context.
 Assert: exactly 3 rows. Then run with no tenant context: assert 0 rows (fails closed).
 ```
@@ -84,8 +85,11 @@ content is a failure even if the UI never links to it.
 
 - **RLS coverage** — every table with `organization_id` has RLS enabled, forced, and
   a policy. Fails the build on a new unprotected table.
-- **Role capability** — service DB role is non-superuser with `NOBYPASSRLS`.
-- **Table classification** — every table is in `TENANT_TABLES` or `GLOBAL_TABLES`.
+- **Role capability** — `assertRlsSafeRole()` passes as `app_user` and refuses a
+  superuser / `BYPASSRLS` role.
+- **Grants** — audit tables reject `UPDATE`/`DELETE` from `app_user`; `plans` is read-only.
+- **Table classification** — every table is explicitly tenant (in the `TENANT_TABLES`
+  list of the RLS-coverage test) or registry/global.
 
 ## Concurrency tests
 
@@ -94,16 +98,28 @@ with 2 seats free (assert exactly 2 succeed). Real Postgres only.
 
 ## Unit tests
 
-Bind an in-memory repository via the DI token — no database, no container:
+No DI container: mock the modules a service imports, and run inside a context scope.
 
 ```ts
-const module = await Test.createTestingModule({
-  providers: [
-    UsersService,
-    { provide: USER_REPOSITORY, useClass: InMemoryUserRepository },
-  ],
-}).compile();
+jest.mock('../../src/lib/prisma', () => ({ getPrisma: () => ({}) }));
+jest.mock('../../src/lib/events', () => ({ publish: jest.fn(), publishAll: jest.fn() }));
+jest.mock('../../src/models/user.model', () => ({ findById: jest.fn(), create: jest.fn() }));
+// stub lib/tenant-db's transaction to call work({}) if the test needs it
+
+await contextStore.run(ctx, () => usersService.invite({ email, role: 'org_member' }));
+expect(events.publish).toHaveBeenCalledWith(TOPICS.USER, expect.objectContaining({ ... }));
 ```
+
+Unit tests prove shape and ordering (lock → check → write → publish after commit);
+they cannot prove the lock or RLS works.
+
+## HTTP contract tests
+
+The public API is a frozen contract with the frontend (the rewrite was verified by a
+black-box HTTP diff). For any route change, assert status, the exact error body
+(`message` / `error` / `statusCode` / `details`) and relevant headers (rate-limit,
+`x-correlation-id`) through `createApp()` + Supertest against a Testcontainers database.
+Call `resetThrottleState()` between tests that hammer one route.
 
 ## Frontend
 
@@ -116,6 +132,7 @@ state. MSW mocks the API. Cover: login and token refresh, invite dialog surfacin
 - [ ] New tenant table → isolation test added
 - [ ] New limit → all three concurrency tests
 - [ ] New role/ability → tests for allowed **and** denied
-- [ ] New event → contract test
+- [ ] New event handler → unit test; audit row asserted where it matters
+- [ ] Route change → HTTP contract test (status + body)
 - [ ] Integration tests use Testcontainers, not mocks
 - [ ] T1–T4 still present and not skipped

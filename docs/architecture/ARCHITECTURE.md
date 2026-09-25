@@ -1,10 +1,139 @@
 # Multi-Tenant Subscription Management — Technical Architecture
 
-**Status:** Design — approved for implementation
-**Phase:** Architecture only. No application code, entities, migrations or installed packages exist yet.
+**Status:** Implemented. The backend now runs as an Express + Prisma monolith — see **§0** for the
+current implementation; the rest of this document is the original design, annotated where superseded.
 **Source of truth for requirements:** `docs/architecture/POC-BRIEF.md`
 
 ---
+
+## 0. Current implementation (Express + Prisma monolith)
+
+> **Read this section first.** §1–§32 below are the original design, written for seven NestJS +
+> TypeORM services over five databases with Kafka and Redis. The backend has since been rewritten
+> as **one Express 5 + Prisma 7 MVC process against one PostgreSQL database**, with identical
+> external API behaviour — a 99-step black-box HTTP diff against the old stack showed zero
+> differences in paths, statuses or bodies. The requirements, the two hard cases, the RLS design
+> (§13), the concurrency design (§19), the CASL model (§12) and decisions D-Q1…D-Q8 all still hold.
+> Sections whose concrete claims no longer hold carry a **Superseded** note pointing here; wherever
+> any other section names a service, a gateway class, a Kafka consumer, a Redis key or a TypeORM
+> class, translate it through §0.3.
+
+### 0.1 Shape
+
+| Aspect | Now |
+|---|---|
+| Process | One Express 5 app (`backend/src/app.ts` builds it, `server.ts` boots it), port 3000. Public API `/api/v1/*` unchanged |
+| Code layout | MVC: `routes/ → controllers/ → services/ → models/`, plus `views/` (response shapes), `dtos/` (class-validator), `middlewares/`, `events/handlers/`, `jobs/`, `lib/` |
+| ORM | Prisma 7 — `prisma-client` generator (output `src/generated/prisma`, CJS) over `@prisma/adapter-pg`. Models use the typed client plus tagged `$queryRaw`/`$executeRaw` where SQL matters (row locks, keyset pagination, SECURITY DEFINER calls) |
+| Schema | Hand-written SQL, `backend/prisma/migrations/0001_init/migration.sql`, applied by `prisma migrate deploy`. `schema.prisma` mirrors it; it is never the source of DDL |
+| Database | One database `app_db`, schema `public` (the old `users.*` / `subs.*` schemas are gone) |
+| Roles | `app_migrator` (DDL, migrator container only) · `app_user` (DML only, `NOSUPERUSER NOBYPASSRLS`, verified at boot by `assertRlsSafeRole()`) · `app_rls_bypass` (`NOLOGIN BYPASSRLS`, owns the SECURITY DEFINER lookups) |
+| Grants | Explicit per table in the migration: audit tables `SELECT, INSERT` only (append-only), `plans` `SELECT` only, `subscriptions` no `DELETE`, the rest full DML |
+| Events | `lib/events` in-process bus. `publish()` after commit; handlers awaited in-process; failures logged and swallowed; no retry/DLQ |
+| Logout denylist | `revoked_access_tokens` table (fails closed), purged hourly by a cron job |
+| Rate limiting | In-memory fixed window per process — same buckets, headers and 429 body as before |
+| Containers | `postgres`, `migrator` (one-shot), `backend`, `frontend` — two published ports (3000, 5178) |
+
+### 0.2 Request pipeline and tenant scoping
+
+```
+app:    helmet → cors(allowlist) → express.json → correlationId → pino-http → /api/v1 → errorHandler
+route:  throttle → authenticate | anonymous → [requirePlatformAdmin] → authorize(action, subject)
+        → validateBody | validateQuery → controller → service → model
+```
+
+- `middlewares/authenticate.ts` is the **only** place a client token is trusted: verifies the JWT,
+  checks the denylist, and opens the `AsyncLocalStorage` context (`lib/context-store.ts`) from the
+  token's claims. `anonymous()` opens a null-identity context for the four public routes
+  (`/auth/login`, `/auth/refresh`, `/onboarding/signup`, `/invitations/:token/accept`).
+- `lib/tenant-db.ts` is the single point where scoping is applied. Every function wraps a Prisma
+  interactive `$transaction` (timeout 30 s, maxWait 10 s):
+
+  | Function | Scope |
+  |---|---|
+  | `transaction(work)` | `set_config('app.current_org', ctx.organizationId, true)` from the request context; platform admin (null org) runs unscoped → zero tenant rows |
+  | `transactionForOrganization(orgId, work)` | Explicit org — event handlers, jobs, the invitation peek |
+  | `transactionWithDeferredScope(work)` | Starts unscoped, callback calls `scope(orgId)` once the org is known — invitation acceptance |
+  | `runGlobal(work)` | Explicitly unscoped, logged at `warn` — registry tables, plan catalogue, NULL-org audit rows, SECURITY DEFINER lookups |
+  | `assertRlsSafeRole()` | Boot check: refuse to start as a superuser or `BYPASSRLS` role |
+
+- The RLS policy (`FORCE`, `NULLIF(current_setting('app.current_org', true), '')::uuid` in both
+  `USING` and `WITH CHECK`) is unchanged from §13.5 / §32.4.
+
+### 0.3 Old concept → new file
+
+| Old (§ references below) | Now |
+|---|---|
+| `api-gateway` `JwtStrategy` / `JwtAuthGuard` (§10, §11.5) | `middlewares/authenticate.ts` |
+| `@Public()` + gateway-signed anonymous context (§9.4) | `anonymous()` in `middlewares/authenticate.ts` |
+| `x-internal-context` HMAC header, `InternalContextGuard`, `InternalHttpClient`, `/internal/*` endpoints (§9.4, §10.5) | **Removed.** Cross-module calls are direct function calls; `INTERNAL_SIGNING_SECRET` is gone |
+| `TenantContextMiddleware` / `TenantContextStore` (`libs/tenant-context`, §13.4) | `lib/context-store.ts` |
+| `TenantAwareDataSource` (`libs/database`, §15.3) | `lib/tenant-db.ts` |
+| `TenantRepository`, TypeORM entities and repositories (§15.2, §15.4) | `models/*.model.ts` + `prisma/schema.prisma` |
+| 16 TypeORM migrations across 5 databases (§14.5) | `prisma/migrations/0001_init/migration.sql` |
+| `CaslAbilityFactory`, `@CheckAbility`, `CaslAbilityGuard` (`libs/authorization`, §12.4) | `lib/casl.ts` `createAbilityForContext()`; `middlewares/authorize.ts` `authorize()` / `assertCan()` |
+| Gateway coarse role gate (§12.4) | `requirePlatformAdmin` in `middlewares/authorize.ts` |
+| Global `ValidationPipe` (§25) | `middlewares/validate.ts` (`whitelist` + `forbidNonWhitelisted`, same 400 body) |
+| Nest `HttpException` + exception filters | `lib/http-errors.ts` + `middlewares/error-handler.ts` (bodies byte-identical to Nest's) |
+| `@nestjs/throttler` + Redis storage (§16.2 #1) | `middlewares/throttle.ts`, in memory |
+| Redis access-token denylist (§11.4, §16.2 #2) | `revoked_access_tokens` + `services/token-denylist.service.ts`; purge at :30 hourly (`jobs/index.ts`) |
+| Redis onboarding idempotency (§16.2 #3) | `onboarding_sagas.idempotency_key` unique constraint (the Redis claim was only ever logged) |
+| `libs/kafka` producer (§17.5) | `lib/events` `publish()` / `publishAll()`; channel names in `types/events.ts` (`organization.events`, …) |
+| user-service `OrganizationProvisioned` consumer | `events/handlers/organization-provisioned.handler.ts` (first org_admin user) |
+| resource-service plan-limit-cache consumer | `events/handlers/plan-limit-sync.handler.ts` |
+| subscription-service storage reconciliation consumer | `events/handlers/storage-reconciliation.handler.ts` |
+| subscription-service `MissingSubscriptionAlarmConsumer` | `events/handlers/missing-subscription-alarm.handler.ts` |
+| audit-service audit / security consumers | `events/handlers/audit-sink.handler.ts`, `security-events.handler.ts` |
+| `consumed_events` dedupe tables (×4), retry, DLQ (§17.6) | **Removed** — no redelivery exists to dedupe |
+| `@nestjs/schedule` invitation sweep (§19.9) | `jobs/invitation-expiry-sweep.ts` (node-cron, hourly at :00) |
+| Gateway `DashboardController` aggregation (§10.4) | `controllers/dashboard.controller.ts` |
+| auth → user role lookup over HTTP (§9.2) | `services/users-read.service.ts`, called directly |
+| tenant → auth / subscription saga calls over HTTP (§8.3) | Direct calls in `services/onboarding.service.ts` (HTTP errors re-labelled `Request failed with status code N` so `last_error` is unchanged) |
+| `auth_db`, `tenant_db`, `core_db` (`users`, `subs`), `resource_db`, `audit_db` (§14) | `app_db`, schema `public` |
+| Per-service Dockerfile + `SERVICE` build arg (§27) | `backend/Dockerfile` (one image) + `backend/Dockerfile.migrator` |
+
+### 0.4 Internal behaviour that changed (external API did not)
+
+- **Event effects are synchronous with the request.** Handlers are awaited before the response, so
+  the first admin user, the `plan_limit_cache` row and audit rows exist when signup (or any
+  publishing request) returns. The §32.3 "503 until the plan limit arrives over Kafka" window is
+  therefore closed in practice; the 503 path remains only if the plan-limit handler itself fails.
+- **Delivery is best-effort.** A handler that throws is logged at `error` and its effect is lost —
+  no retry, no DLQ, no outbox. The publishing request still succeeds.
+- **Rate limiting is per process.** With N backend replicas the effective limit is N×.
+- **Readiness** `GET /api/v1/health/ready` returns `{status, database}` (was `{status, redis}`).
+- **No network inside a transaction** still holds, trivially: `publish()` runs after commit and the
+  only network peer is Postgres.
+
+### 0.5 Known behaviours intentionally kept (follow-ups, not fixed in the rewrite)
+
+Carried over verbatim so the HTTP diff stayed at zero. Each is a candidate fix:
+
+1. The invitation-expiry sweep processes nothing: it lists org ids with an unscoped query on
+   `subscriptions`, which RLS filters to zero rows.
+2. `GET /audit` for a platform admin shows only NULL-org (platform-level) events — the unscoped
+   read is RLS-filtered to those.
+3. The first admin (created by the `OrganizationProvisioned` handler) is not counted in
+   `used_seats`.
+4. Accepting an invitation for an email that already has a credential returns **500** (the
+   credential conflict is rethrown as a non-HTTP error).
+5. Seat and storage 409 details carry `planCode: 'unknown'`.
+6. No lock in `updateRole` / `removeUser` around the last-admin count (write skew: two concurrent
+   demotions can leave zero admins), and none around refresh-token rotation.
+7. A non-UUID `x-correlation-id` makes the audit insert fail (column is `uuid`); the failure is
+   swallowed, so the audit row is silently missing.
+8. Login does not check organisation status (§32.3's suspended-org gap).
+9. `/users/:id` and `/organizations/:id` do not validate the id as a UUID — a malformed id is a 500.
+10. A platform admin calling `GET /subscriptions/current` gets a 500.
+
+### 0.6 Upgrading an existing dev environment
+
+The old `docker/postgres/init.sh` created five databases and no `app_db`, and Postgres runs init
+scripts only on an empty volume. Run `docker compose down -v` (**destroys local data**) before the
+first `docker compose up` of the new stack, and recreate `.env` from `.env.example`.
+
+---
+
 
 ## 1. Project Overview
 
@@ -82,9 +211,9 @@ Condensed from the brief. The brief remains the spec; this is an index.
 |---|---|---|
 | **G1 — Structural tenant isolation** | Four independent enforcement layers, the deepest being PostgreSQL Row-Level Security which no application code can forget | §13; the careless-query test |
 | **G2 — Correct plan limits under concurrency** | Single ACID transaction, row lock, plus a database `CHECK` constraint as a backstop | §19; the 2-request and 50-request tests |
-| **G3 — Clear service boundaries with owned data** | 7 services, each owning its schema; no arbitrary cross-service table reads | §7, §14, §21 |
+| **G3 — Clear module boundaries with owned data** | Originally 7 services each owning a schema; now one process whose modules are MVC file groups over one database (§0) | §0, §21 |
 | **G4 — Provable platform-admin content boundary** | Platform admin tokens carry no `orgId`, so RLS returns zero content rows by construction; no bypass flag exists in the codebase | §13.6 |
-| **G5 — Structured, queryable traces** | Correlation ID minted at the gateway, propagated through REST and Kafka headers; three mandated trace points | §24 |
+| **G5 — Structured, queryable traces** | Correlation ID accepted or minted by `middlewares/correlation-id.ts`, carried in every event envelope and audit row; three mandated trace points | §26 |
 | **G6 — Reviewable simplicity** | Every service, container, dependency and event in this document carries a stated reason | §23 MVP rule |
 | **G7 — Testability** | DI against interfaces, Testcontainers for real Postgres behaviour (RLS and locks cannot be mocked) | §28 |
 
@@ -99,14 +228,14 @@ not overlooked.
 |---|---|
 | Kubernetes, service mesh, Helm | `docker compose up` is the stated deployment target |
 | Prometheus / Grafana / Elasticsearch / Jaeger | Structured JSON logs with correlation IDs meet the brief's traceability requirement at a fraction of the infrastructure |
-| RabbitMQ | Kafka already covers the event backbone; two brokers is two brokers |
+| RabbitMQ (or any broker) | Originally: Kafka covered the event backbone. Now: events are in-process (§0) |
 | Billing, payment processing, invoicing | Plans and limits are in scope; charging money is not |
 | Multi-region, sharding, read replicas | §29 documents the path; the POC runs single-region |
 | SSO / OAuth / SAML | Local credentials with Argon2 is sufficient to demonstrate the auth boundary |
 | Email delivery | Invitations are modelled and audited; actual SMTP is stubbed and logged |
 | A user belonging to multiple organisations | The brief states a user belongs to exactly one organisation; this materially simplifies the isolation model |
 | Fine-grained per-field permissions | Three roles at resource granularity is the stated requirement |
-| Prisma, Sequelize, Drizzle, Mongoose, or any ORM besides TypeORM | Hard constraint |
+| Sequelize, Drizzle, Mongoose, or a second ORM | Prisma is the ORM (§0, §15). *The original TypeORM-only constraint is superseded* |
 | Redux, Zustand, MobX | Server state is the only real state; TanStack Query owns it |
 
 ---
@@ -118,25 +247,27 @@ stable compatible release at that time.
 
 ### 5.1 Backend
 
+*Rewritten for the current implementation (§0). The original design used NestJS, TypeORM, Kafka,
+Redis, Passport, `@nestjs/throttler` and `@nestjs/axios`; none of those remain.*
+
 | Concern | Choice | Reason |
 |---|---|---|
-| Runtime | Node.js LTS | — |
-| Framework | **NestJS** | Built-in DI container, module boundaries, and first-class monorepo support for multiple apps |
-| Language | TypeScript, `strict: true` | — |
-| Package manager | **pnpm** (workspace) | Content-addressed store — 7 services sharing `libs/` without 7 copies of `node_modules`; strict by default, so a service cannot import an undeclared dependency |
-| ORM | **TypeORM** — *the only ORM* | Hard constraint. Also: `DataSource.transaction` gives explicit transaction boundary control and `QueryRunner` access, which §19 requires |
+| Runtime | Node.js >= 22 | — |
+| Framework | **Express 5** | The brief's stated stack; async handlers forward rejections to the error handler natively |
+| Language | TypeScript, `strict: true` (CommonJS) | — |
+| Package manager | **pnpm** | Strict by default, so code cannot import an undeclared dependency |
+| ORM | **Prisma 7** (`prisma-client` generator, `@prisma/adapter-pg`) | The brief's stated stack. Interactive `$transaction` gives the explicit transaction boundary §19 requires; tagged `$queryRaw` covers `FOR UPDATE`, keyset pagination and SECURITY DEFINER calls. DDL stays hand-written SQL because Prisma cannot express RLS |
 | Database | **PostgreSQL** | Row-Level Security (§13) and `SELECT … FOR UPDATE` (§19) are both load-bearing and both PostgreSQL features |
-| Event bus | **Apache Kafka** (KRaft mode) | Durable, ordered, replayable event log for audit (§17). KRaft removes the ZooKeeper container |
-| Cache / ephemeral state | **Redis** | Rate-limit buckets, refresh-token store, idempotency keys (§16) |
-| Auth | `@nestjs/jwt`, `@nestjs/passport`, `passport-jwt` | Stated requirement |
+| Events | In-process bus (`lib/events`) | Audit and counter reconciliation still decoupled from the request's transaction, without a broker |
+| Auth | `jsonwebtoken` | Access/refresh JWTs, verified in one middleware |
 | Password hashing | **Argon2** (`argon2`, Argon2id) | Stated requirement; memory-hard, current best practice |
 | Authorisation | **CASL** (`@casl/ability`) | Stated requirement; declarative abilities, conditions on subject attributes |
-| Validation | `class-validator` + `class-transformer` via global `ValidationPipe` | Rejects bad input before business logic — brief §6 |
-| Security headers | `helmet` | Stated requirement |
-| Rate limiting | `@nestjs/throttler` + Redis storage | Stated requirement; Redis storage so limits hold across replicas |
-| Logging | `nestjs-pino` / `pino` | Structured JSON out of the box, low overhead |
-| HTTP client | `@nestjs/axios` | Service-to-service REST with interceptors for context propagation |
-| Testing | **Jest** + `@nestjs/testing` + **Testcontainers** | RLS policies and row locks cannot be mocked — they need a real PostgreSQL |
+| Validation | `class-validator` + `class-transformer` via `validateBody` / `validateQuery` middleware | Rejects bad input before business logic — brief §6 |
+| Security headers | `helmet`, `cors` (allowlist) | Stated requirement |
+| Rate limiting | In-memory fixed window (`middlewares/throttle.ts`) | Stated requirement; per-process — see §0.4 |
+| Scheduling | `node-cron` | Invitation sweep, denylist purge |
+| Logging | `pino` + `pino-http` | Structured JSON out of the box, low overhead |
+| Testing | **Jest** + Supertest + **Testcontainers** | RLS policies and row locks cannot be mocked — they need a real PostgreSQL |
 
 ### 5.2 Frontend
 
@@ -157,14 +288,17 @@ stable compatible release at that time.
 
 ### 5.3 Explicitly rejected
 
-`Prisma` / `Sequelize` / `Drizzle` / `Mongoose` (TypeORM only, hard constraint) · `Redux` /
-`Zustand` / `MobX` (§4) · `RabbitMQ` (Kafka covers it) · `bcrypt` (Argon2 specified) ·
+`Sequelize` / `Drizzle` / `Mongoose` / TypeORM (Prisma is the ORM; the original "TypeORM only"
+constraint is superseded) · `Redux` / `Zustand` / `MobX` (§4) · `RabbitMQ` / Kafka / Redis (not
+needed by the monolith, §0) · `bcrypt` (Argon2 specified) ·
 `moment` (native `Intl` / `date-fns` if genuinely needed) · any component library such as MUI or
 shadcn-as-a-dependency (§22 builds a small set of primitives instead).
 
 ---
 
 ## 6. High-Level System Architecture
+
+> **Superseded (see §0).** The diagram and lifecycle below describe the original gateway + seven services + Kafka + Redis topology. The current shape is one Express process against one database; its request pipeline is in §0.2. Steps 4–5 (signed internal header) no longer exist; step 10 is `lib/tenant-db.ts` issuing `set_config(...)`; step 11 is unchanged.
 
 ```
                         ┌────────────────────────────────┐
@@ -248,6 +382,8 @@ Steps 4, 5, 6, 10 and 11 are the isolation chain. Step 11 is the one no develope
 
 ## 7. Microservices Breakdown
 
+> **Superseded (see §0).** The backend is no longer split into services. The seven bounded contexts below survive only as groups of files in one process (e.g. users = `routes/users.routes.ts`, `controllers/users.controller.ts`, `services/users.service.ts`, `services/users-read.service.ts`, `models/user.model.ts`, `models/invitation.model.ts`, `views/user.view.ts`), and "cannot read another service's tables" is no longer a physical property — every module connects as the same `app_user` to the same database. Isolation between *tenants* is unaffected (RLS, §13); separation between *modules* is now a code-review convention (§21.3). The reasoning below is kept as the record of why the contexts were drawn where they are.
+
 ### 7.1 Decomposition principle
 
 Services are drawn along **security and lifecycle boundaries**, not along entity boundaries. The
@@ -291,6 +427,8 @@ Candidates deliberately **not** created:
 ---
 
 ## 8. Service Responsibilities
+
+> **Superseded (see §0).** Read each "service" below as a module of the monolith (§0.3). The endpoint tables, owned data and events are still accurate as a description of the public API and the tables; the transport details (gateway forwarding, internal endpoints, Kafka consumers, per-service databases) are not.
 
 Full specification for each service. Each states: why it exists, what it owns, its API, its events,
 and why the boundary is right **for this POC specifically**.
@@ -570,6 +708,8 @@ observability without ever failing a user request (§30).
 
 ## 9. Service Communication
 
+> **Superseded (see §0).** There is no inter-service communication any more. Every REST row in §9.2 between two backend services is now a direct function call; every Kafka row is an in-process `publish()` → handler (awaited, after commit); the Redis row is gone. §9.4's internal context header, anonymous signed context and `InternalHttpClient` were removed entirely — there is no second hop to authenticate. The rule in §9.1 survives in spirit: code that needs an answer calls a function; code that merely reacts subscribes to an event.
+
 ### 9.1 The rule
 
 > **Use REST when the caller cannot continue without the answer.
@@ -670,6 +810,17 @@ sign.
 ---
 
 ## 10. API Gateway
+
+> **Superseded (see §0).** There is no gateway. The backend process is itself the single published
+> entry point, so the one-place-where-a-JWT-becomes-context property (§10.1) is now held by
+> `middlewares/authenticate.ts`. The §10.2 responsibilities map to app- and route-level middleware:
+> routing → `routes/`; JWT + denylist → `authenticate`; correlation id → `middlewares/correlation-id.ts`;
+> rate limiting → `middlewares/throttle.ts` (in memory, same strict bucket for `/auth/login`,
+> `/auth/refresh`, `/onboarding/signup`); helmet + CORS allowlist → `app.ts`; malformed JSON /
+> oversized bodies → `express.json()` + `errorHandler`; coarse platform-admin gate →
+> `requirePlatformAdmin`. §10.3's "no database in the gateway" and §10.5's network/signature/distinct-secret
+> layers no longer apply — there is no downstream service to protect. The dashboard aggregation
+> (§10.4) is `controllers/dashboard.controller.ts`. The text below is the original design.
 
 ### 10.1 Decision: yes, use one
 
@@ -815,6 +966,8 @@ remaining TTL, which is why revocation is immediate rather than up-to-15-minutes
 
 ### 11.5 Passport wiring
 
+> **Superseded (see §0).** No Passport. Routes are authenticated by adding `authenticate` to the route's middleware chain; the four public routes in the table below use `anonymous` instead (`routes/index.ts` lists them). The route list and its justifications are unchanged.
+
 - `JwtStrategy` (`passport-jwt`) lives in **`api-gateway` only**.
 - `JwtAuthGuard` is registered as a global `APP_GUARD` at the gateway, so routes are authenticated
   by default and `@Public()` is required to opt out. **Four business routes carry `@Public()`:**
@@ -910,6 +1063,8 @@ cannot ('manage', 'User')                                       // cannot invite
 
 ### 12.4 Where CASL lives — decision
 
+> **Superseded (see §0).** With no gateway, both jobs run in the one process: `requirePlatformAdmin` is the coarse role gate and `authorize(action, subject)` the type-level CASL check (`lib/casl.ts`, `middlewares/authorize.ts`); row-level conditions (e.g. members may modify only their own resources) are checked in the service once the row is loaded. The current role rules are in `lib/casl.ts` — note org members can now read users org-wide, not only themselves.
+
 **Decision: primarily inside each service; only coarse role checks at the gateway.**
 
 | Layer | Does | Why |
@@ -926,6 +1081,8 @@ CASL lives in `libs/authorization`: `Action`/`Subject` enums, `CaslAbilityFactor
 subject types.
 
 ### 12.5 Enforcement pattern
+
+> **Superseded (see §0).** Now `authenticate → [requirePlatformAdmin] → authorize → validate → controller` (§0.2). `authorize` reads the context from `contextStore`, never from `req`.
 
 ```
 InternalContextGuard  →  TenantContextMiddleware (ALS)  →  CaslAbilityGuard  →  handler
@@ -995,6 +1152,8 @@ Each layer independently catches a mistake the layer above it might miss.
 
 ### 13.3 Layer 1 — where tenant context originates
 
+> **Superseded (see §0).** The org still comes only from the access token's claim; there is no re-signing into an internal header (§0.3).
+
 `orgId` has exactly one source: the `orgId` claim of an access token minted by `auth-service`,
 re-signed by the gateway into `x-internal-context`.
 
@@ -1005,6 +1164,8 @@ Where an ID does appear in a path (`/users/:id`), it is the *resource* ID, and R
 that row is visible.
 
 ### 13.4 Layer 2 — how context travels
+
+> **Superseded (see §0).** Within the process: `middlewares/authenticate.ts` opens the ALS scope (`lib/context-store.ts`) directly from the verified JWT — there is no `InternalContextGuard`, and no service boundary to cross. Event handlers get a fresh scope built from the event envelope by `lib/events` (not the publisher's ambient context), which preserves the "consumers never inherit a producer's context" property below.
 
 **Within a service:** `AsyncLocalStorage`, in `libs/tenant-context`.
 
@@ -1195,6 +1356,18 @@ exists — an existence oracle that leaks precisely the information isolation is
 
 ## 14. Database Architecture
 
+> **Superseded (see §0).** There is **one** database, `app_db`, with every table in schema `public`.
+> The five-database ownership table (§14.1) and the `core_db` shared-schema trade-off (§14.2) no
+> longer apply: with one database the §19 seat transaction trivially spans `users`, `invitations`
+> and `subscriptions`, which is the outcome §14.2 argued for. Table names drop their schema prefix
+> (`users.users` → `users`, `users.invitations` → `invitations`, `subs.subscriptions` →
+> `subscriptions`, `subs.plans` → `plans`, `subs.subscription_history` → `subscription_history`).
+> Differences from the §14.3 sketch: the four `consumed_events` tables are gone; a
+> `revoked_access_tokens (jti, expires_at)` registry table replaces the Redis denylist;
+> `plan_limit_cache` also carries `used_storage_bytes` (the authoritative storage counter, §19.6).
+> Grants are explicit per table in the migration (§0.1). Migrations: see the rewritten §14.5.
+> §14.4's indexes are unchanged.
+
 ### 14.1 Ownership
 
 | Database | Owned by | Isolation | Reason |
@@ -1333,146 +1506,103 @@ audit_events       (organization_id, occurred_at DESC)
 
 ### 14.5 Migrations
 
-TypeORM migrations, checked in, **one directory per service**. `synchronize: false` in every
-environment without exception — it is the one setting that could silently drop an RLS policy.
-Migrations run as `app_migrator`; the runtime role `app_user` has no DDL rights. Every migration
-creating a tenant table must, in the same migration, enable and force RLS and create the policy —
-enforced by the §13.8 CI check.
+*Rewritten for the current implementation.* Hand-written SQL in
+`backend/prisma/migrations/<NNNN_name>/migration.sql`, applied in lexical order by
+`prisma migrate deploy` from the one-shot `migrator` container, as `app_migrator`; the runtime role
+`app_user` has no DDL rights. `0001_init` is the sixteen original TypeORM migrations merged into
+one. **`prisma migrate dev` / `db push` / `migrate reset` are never used** — they diff
+`schema.prisma` against the database and would drop or omit what Prisma cannot model (RLS policies,
+`FORCE`, grants, partial indexes, SECURITY DEFINER functions). Every migration creating a tenant
+table must, in the same migration, enable and force RLS, create the policy and grant `app_user`
+exactly the privileges it needs; `schema.prisma` is then updated to mirror it and the client
+regenerated. The three plans are seeded by the migration; the platform admin by
+`prisma/seed-platform-admin.ts`.
 
 ---
 
-## 15. TypeORM Strategy
+## 15. ORM Strategy (Prisma)
 
-TypeORM is the only ORM. No Prisma, Sequelize, Drizzle or Mongoose, in any service, at any time.
+*Rewritten for the current implementation. The original section specified TypeORM
+(`TenantAwareDataSource`, `TenantBaseEntity`, `TenantRepository`, repository interfaces bound by DI
+tokens); all of that is replaced as follows.*
 
 ### 15.1 Configuration
 
 | Setting | Value | Reason |
 |---|---|---|
-| `synchronize` | `false` — always | Would drop RLS policies silently |
-| `migrationsRun` | `false` | Migrations are an explicit deploy step, not a boot side effect |
-| `namingStrategy` | `SnakeNamingStrategy` | `organizationId` ↔ `organization_id` without per-column mapping |
-| `logging` | `['error','warn','migration']`; `query` in dev only | Query logs can contain tenant data |
-| `entities` | Explicit imports, not globs | Globs make it possible to load another service's entity by accident |
-| `poolSize` | Per service, tuned | Each service has its own pool |
+| Generator | `prisma-client`, output `src/generated/prisma`, `moduleFormat = "cjs"` | Generated code is git-ignored and never edited |
+| Driver | `@prisma/adapter-pg` over `pg` | One pool, connected as `app_user` (`lib/prisma.ts`) |
+| CLI datasource | `prisma.config.ts`, connected as `app_migrator` | Only `migrate deploy` / `migrate status` use it; the app never does |
+| Schema source of truth | The SQL migrations, not `schema.prisma` | Prisma cannot express RLS (§14.5) |
+| Client creation | Lazy singleton `getPrisma()`; `setPrisma()` for tests | Importing a model never opens a pool |
 
-### 15.2 Entity organisation
+### 15.2 Model organisation
 
-Entities live in the service that owns them. There is **no shared entity library** — a shared entity
-is shared coupling, and it invites the cross-service table access §21 forbids. `libs/common` holds
-shared *types, DTOs and event contracts* only, never `@Entity()` classes.
+`prisma/schema.prisma` maps every table (`@@map`, `@map` to snake_case, `@db.Uuid` /
+`@db.Citext` / `@db.Timestamptz`, named constraints via `map:`), with a comment where the SQL has
+something Prisma cannot represent (e.g. the partial unique index `uq_invitations_org_email_pending`).
+`src/models/<table>.model.ts` is the only code that queries a table. Each model exports plain domain
+types and functions that take a transaction client (`Tx`) as their first argument, and converts
+Prisma `BigInt` columns (`size_bytes`, `*_storage_bytes`) to `number` at the boundary so the rest of
+the code — and the JSON — never sees a `BigInt`.
 
-`TenantBaseEntity` in `libs/database` carries `id`, `organizationId`, `createdAt`, `updatedAt`,
-`deletedAt`. Every tenant-owned entity extends it, so `organization_id` cannot be forgotten on a
-new table — the same column the RLS policy and the CI check both look for.
+### 15.3 `lib/tenant-db.ts`
 
-### 15.3 `TenantAwareDataSource`
+The single point through which tenant scoping is applied — see §0.2 for the five functions. Each
+wraps `getPrisma().$transaction(async (tx) => …)`; the scoped variants issue
+`SELECT set_config('app.current_org', $1, true)` as the first statement. Raw SQL through
+`tx.$queryRaw` runs in the same transaction, so it is covered identically. Every read goes through a
+transaction, because the transaction-local setting needs one.
 
-The single point through which tenant scoping is applied:
+### 15.4 Models instead of repositories
 
-- Wraps `DataSource.transaction()`; issues `SELECT set_config('app.current_org', $1, true)` from the
-  ALS context before running the callback (not `SET LOCAL app.current_org = $1` — see §32.4;
-  Postgres's `SET`/`SET LOCAL` reject bind parameters entirely, `set_config`'s third argument gives
-  the identical transaction-local scoping).
-- Refuses to open a transaction when tenant context is absent **and** the caller has not explicitly
-  declared a global operation (`runGlobal()`, used only by migrations, the plan catalogue, and
-  Kafka consumers before they establish their own scope).
-- Applies to `QueryRunner` access, so raw SQL is covered identically.
-
-Read-only queries outside an explicit transaction are wrapped in an implicit one, because this
-scoping call requires a transaction to apply "local" to. The small cost of an extra `BEGIN`/`COMMIT`
-on simple reads buys the guarantee that there is no code path where the variable is unset.
-
-**A fourth method, `transactionWithDeferredScope()`, for the one case where the organisation is not
-known until partway through a transaction.** Invitation acceptance (§19.8) is the case: the caller
-has only a token, and the organisation it belongs to is discovered by looking the token up — but the
-lookup, the discovery, and the subsequent scoped work (locking the subscription row, creating the
-user, marking the invitation accepted) all need to happen under **one** lock, with no gap where a
-concurrent request could act between "found the org" and "scoped the transaction to it". This method
-opens a transaction with `app.current_org` unset (like `runGlobal()`), hands the callback a
-`setScope(organizationId)` function, and lets the callback call it once it has discovered which
-tenant it belongs to — every query after that point in the *same* transaction is scoped exactly as
-`transaction()` would have scoped it from the start. The initial, pre-scope lookup must be on a
-non-RLS-dependent key (a random single-use token is itself the authorization to read that one row —
-§11.5) or via one of the two named exceptions in §13.6.
-
-### 15.4 Repository pattern and DI
-
-Services depend on **interfaces**, not on `Repository<T>`:
-
-```
-IUserRepository            (libs or service domain layer — an interface)
-   ▲
-   │ implements
-TypeOrmUserRepository      (infrastructure; extends TenantRepository)
-```
-
-Bound by injection token in the service's module. This is what lets unit tests substitute an
-in-memory repository with no database, and what makes a future storage change a module edit rather
-than a service rewrite (§20).
+There is no DI container and no repository interface layer. Services import model modules directly;
+unit tests replace them with `jest.mock('../../src/models/…')`, integration tests use the real ones
+against Testcontainers. `lib/tenant-db.ts` is the seam that stays mandatory: a model function never
+opens its own transaction and never reads the tenant context.
 
 ### 15.5 Transactions
 
-Explicit `dataSource.transaction(async (manager) => …)` in the application service layer. Never a
-decorator that hides the boundary, because §19's correctness depends on knowing exactly where the
-transaction begins and ends.
+Explicit `transaction(async (tx) => …)` in the service layer — never hidden. Interactive
+transactions run with `timeout: 30_000`, `maxWait: 10_000`, sized for a queue of concurrent seat-lock
+waiters.
 
-**Rule: no network call inside a transaction.** No HTTP, no Kafka publish, no Redis round-trip. A
-transaction holding a row lock while awaiting a network response is how a seat-limit check becomes
-a site-wide stall. Events are published *after* commit (§17.5).
+**Rule: no network call inside a transaction.** Events are published *after* commit (§17.5);
+`publish()` is never called with a `tx` in scope.
 
 ---
 
 ## 16. Redis Strategy
 
-### 16.1 Decision
+> **Superseded (see §0).** Redis has been removed. Each of its jobs moved as follows, and none of
+> them was ever on the correctness path:
 
-Redis is included for **three narrowly-scoped jobs**. It is never the source of truth for business
-data, and explicitly never the mechanism guaranteeing the plan-limit constraint.
+| Former Redis job | Now | Failure behaviour |
+|---|---|---|
+| Rate-limit buckets | In-memory fixed window per process (`middlewares/throttle.ts`); same `X-RateLimit-*` / `Retry-After` headers (ms) and 429 body | Cannot fail independently. Per-process: N replicas ⇒ N× the limit — acceptable for a single-replica POC; a shared store (Postgres or Redis) is the upgrade path |
+| Access-token denylist | `revoked_access_tokens (jti PK, expires_at)`, written on logout with the token's remaining TTL, checked on every authenticated request, purged hourly | Fails **closed**: if the lookup errors, the token is treated as revoked (every request 401s during a DB outage, which fails anyway) |
+| Onboarding idempotency | `onboarding_sagas.idempotency_key` unique constraint — the guarantee all along; the Redis claim was only logged | — |
+| Usage read-model cache (optional) | Never built; reads go to `subscriptions` directly | — |
 
-### 16.2 What Redis does
-
-| # | Use | Key shape | TTL | Why Redis |
-|---|---|---|---|---|
-| 1 | **Rate limiting** | `throttle:{ip|userId}:{route}` | Window | `@nestjs/throttler`'s in-memory store is per-process. With multiple gateway replicas, in-memory limits are per-replica — meaning the real limit is N× the configured one. Shared state is required for the limit to mean anything |
-| 2 | **Token denylist + refresh index** | `denylist:{jti}`, `refresh:{jti}` | Token remaining TTL | Makes logout immediate rather than up-to-15-minutes-late. Naturally expiring keys are exactly the right primitive — no cleanup job |
-| 3 | **Onboarding idempotency** | `onboarding:{idempotencyKey}` | 24h | A double-submitted signup must not create two organisations. A short-lived atomic `SET NX` is the cheapest correct answer |
-
-A fourth, optional use: a cached usage read-model (`usage:{orgId}` → seats/storage) for the
-dashboard, TTL 30s, refreshed by the Kafka consumer. **Display only.** If this cache is stale, wrong,
-or entirely absent, no limit is enforced incorrectly — because enforcement never reads it (§19).
-
-**It must cache `used_seats`, the authoritative counter — not a user count.** Under D-Q1 a seat is
-held by a user *or* a pending invitation. A meter showing "3 of 5" while the API returns 409 is
-exactly the confusing refusal R6 exists to prevent, so the cached figure and the enforced figure
-must be the same number.
-
-### 16.3 What Redis must never do
-
-| Forbidden | Why |
-|---|---|
-| Guarantee the plan-limit constraint | A distributed lock in Redis cannot be made correct under network partition without fencing tokens. PostgreSQL's row lock is already transactional, already correct, and already present |
-| Store business data as source of truth | Redis is configured without AOF persistence here; a restart loses everything, and that must be survivable |
-| Cache tenant-scoped content without the tenant in the key | A key collision across tenants is a data leak. Any tenant-scoped key **must** include `orgId` — enforced by a `tenantKey()` helper in `libs/redis` |
-| Hold session state | Sessions are stateless JWTs; adding server-side sessions would undo that |
-
-### 16.4 Failure behaviour
-
-Redis down:
-
-- Rate limiting: fails **open** (requests proceed). A rate limiter is a protection, not a correctness
-  control, and failing closed would turn a Redis blip into a total outage. Logged as a security-relevant
-  degradation.
-- Token denylist: fails **closed** for logout — a logged-out token stays valid until it expires
-  (max 15 min). Documented as accepted risk.
-- Idempotency: falls back to the unique constraint on `onboarding_sagas.idempotency_key`. The
-  database is the real guarantee; Redis is the fast path.
-
-Every Redis dependency degrades rather than fails. Nothing in the correctness-critical path touches it.
+The §16.3 prohibitions still apply to any cache introduced later: never the limit guarantee, never
+the source of truth, and any tenant-scoped key must include the org id.
 
 ---
 
 ## 17. Kafka / Event-Driven Architecture
+
+> **Superseded (see §0).** Kafka has been removed; events are dispatched by the in-process bus in
+> `lib/events`. What still holds: the five channel names (`organization.events`, `user.events`,
+> `subscription.events`, `resource.events`, `security.events` — `types/events.ts`), the event
+> catalogue in §17.3 (the consumers column now names handlers in `events/handlers/`, §0.3), the
+> envelope in §17.7 (the bus stamps `eventId`, `occurredAt`, `eventVersion: 1` and the request's
+> `correlationId`), §17.4 (events are never used for enforcement or request/response), and §17.5's
+> publish-after-commit rule. What changed: there are no partitions or keys (§17.2); handlers run in
+> registration order — domain handlers first, audit sinks last — inside a fresh ALS scope built from
+> the envelope, and are **awaited** before the publishing request responds; a failing handler is
+> logged and skipped, with no retry, DLQ or `consumed_events` dedupe (§17.6). The accepted loss
+> window is now "a handler threw", not "the process crashed between commit and publish" — both
+> still have the same outbox upgrade path.
 
 ### 17.1 Decision
 
@@ -1570,6 +1700,8 @@ single trace spans gateway → service → consumer → audit record (§24).
 
 ## 18. Kafka vs Redis — Decision
 
+> **Superseded (see §0).** Neither is used any more (§0, §16, §17). §18.4 anticipated this: "this POC could function with neither". What was lost by dropping them, named explicitly: cross-replica rate limiting (now per process), durable/replayable event history and retries (handlers are best-effort in-process), and failure isolation between audit and request handling (a slow audit insert now adds latency to the request that published the event). What was gained: two fewer containers, no consumer lag, and event effects that exist when the response is sent.
+
 ### 18.1 They are not alternatives
 
 A common framing error: Kafka and Redis are not competing choices. They solve unrelated problems and
@@ -1630,6 +1762,15 @@ to every component here.
 ---
 
 ## 19. Concurrency Strategy
+
+> **Implementation note (see §0).** The design below holds unchanged. Where it names
+> `user-service`, read `services/users.service.ts` + `models/subscription-seat.model.ts` (seat lock)
+> and `models/invitation.model.ts`; storage is `services/resources.service.ts` +
+> `models/plan-limit-cache.model.ts`; downgrade is `services/subscriptions.service.ts`; the sweep is
+> `jobs/invitation-expiry-sweep.ts` on node-cron, not `@nestjs/schedule`. With one database the
+> cross-schema concern in §19.9 disappears. Two kept quirks bear on this section: the sweep currently
+> releases nothing (§0.5 #1), and the last-admin check in role change / removal is not under a lock
+> (§0.5 #6).
 
 Requirement R7: *two simultaneous requests that would each individually fit within the remaining
 limit, but together exceed it, must not both succeed.*
@@ -1882,6 +2023,8 @@ other 3 seats are held by outstanding invites.
 
 ## 20. Dependency Injection Strategy
 
+> **Superseded (see §0).** There is no DI container. The layering survives as `controller → service → model → lib/tenant-db → PostgreSQL RLS` (§0.2), with modules imported directly and substituted in unit tests via `jest.mock`. Tenant context still comes from `AsyncLocalStorage`, for the reason §20.4 gives. The seam §20.3 describes for a future seat-reservation split is `models/subscription-seat.model.ts`.
+
 DI is mandatory. `new SomeService()` never appears in application code — NestJS's container owns
 every lifetime.
 
@@ -1968,63 +2111,46 @@ React-to-full-stack/
 
 ### 21.2 Backend
 
+*Rewritten for the current implementation.*
+
 ```
 backend/
-├── apps/
-│   ├── api-gateway/            routing, JWT verify, context minting, throttling
-│   ├── auth-service/           credentials, tokens, Argon2
-│   ├── tenant-service/         organisations, onboarding saga
-│   ├── user-service/           users, roles, invitations, SEAT LIMIT TRANSACTION
-│   ├── subscription-service/   plans, subscriptions, limits, usage
-│   ├── resource-service/       tenant resources, storage limit
-│   └── audit-service/          Kafka consumer → append-only audit log
-│
-├── libs/
-│   ├── common/                 DTOs, event contracts, shared types, exception filters
-│   │                           NEVER @Entity() classes — §15.2
-│   ├── auth/                   JwtStrategy, guards, token utilities
-│   ├── authorization/          CASL: Action/Subject, ability factory, @CheckAbility, guard
-│   ├── tenant-context/         AsyncLocalStorage store, middleware, InternalContextGuard
-│   ├── database/               TenantAwareDataSource, TenantBaseEntity, TenantRepository
-│   ├── kafka/                  producer, base consumer (opens ALS), envelope, DLQ, retry
-│   ├── redis/                  client, tenantKey() helper, throttler storage
-│   └── logging/                pino config, correlation-id middleware, redaction
-│
-├── test/
-│   ├── integration/            Testcontainers: RLS, locks, cross-tenant
-│   └── e2e/                    full-stack flows through the gateway
-│
-├── pnpm-workspace.yaml
-├── nest-cli.json               monorepo project definitions
+├── src/
+│   ├── server.ts / app.ts      boot checks + listener / middleware pipeline (no listen)
+│   ├── config/env.ts           every environment variable
+│   ├── routes/                 one Router per area — the per-route middleware chain
+│   ├── controllers/            HTTP only
+│   ├── services/               business logic, transaction boundaries, publish() after commit
+│   ├── models/                 one file per table; Prisma + tagged raw SQL; take a Tx
+│   ├── views/                  domain → response body
+│   ├── dtos/                   class-validator request classes
+│   ├── middlewares/            throttle, authenticate, authorize, validate, correlation-id, error-handler
+│   ├── events/handlers/        in-process event handlers (former Kafka consumers)
+│   ├── jobs/                   node-cron jobs
+│   ├── lib/                    tenant-db, context-store, events, casl, http-errors, prisma, …
+│   ├── types/                  constants, event catalogue, tenant context
+│   └── generated/prisma/       generated client (git-ignored)
+├── prisma/
+│   ├── schema.prisma           mirrors the SQL schema
+│   ├── migrations/             hand-written SQL (0001_init, …)
+│   └── seed-platform-admin.ts
+├── tests/{unit,integration,http,support}/
+├── prisma.config.ts
+├── Dockerfile / Dockerfile.migrator
 └── package.json
-```
-
-Each app follows the same internal shape, which keeps the seven services legible as one system:
-
-```
-apps/user-service/src/
-├── main.ts
-├── app.module.ts
-├── users/
-│   ├── users.controller.ts        HTTP only
-│   ├── users.service.ts           orchestration, transaction boundary
-│   ├── domain/                    pure rules + repository INTERFACES
-│   ├── infrastructure/            TypeORM repository implementations
-│   ├── entities/                  owned entities (extend TenantBaseEntity)
-│   └── dto/                       class-validator DTOs
-├── database/migrations/
-└── events/                        producers + consumers
 ```
 
 ### 21.3 Boundary rules
 
 | Rule | Reason |
 |---|---|
-| An app never imports from another app | That is a distributed monolith |
-| `libs/` never imports from `apps/` | Dependencies point one way |
-| No `@Entity()` in `libs/` | Shared entities re-create shared tables (§15.2) |
-| No cross-service database access | Except the one documented `subs.subscriptions` grant (§14.2) |
-| Every app has its own `Dockerfile` and migrations | Independently deployable |
+| Controllers never import Prisma or models | HTTP concerns stay out of data access |
+| Models never read `contextStore` or `req`, never open their own transaction | Scoping is applied in exactly one place (`lib/tenant-db.ts`) |
+| Only `middlewares/authenticate.ts` turns a token into tenant context | One origin for `organizationId` (§13.3) |
+| `runGlobal()` only for registry tables, the plan catalogue, NULL-org audit rows and SECURITY DEFINER lookups | It is the audited exception, not a convenience |
+| A module reads another module's table only through that module's service or model | The old service boundaries remain the intended seams for a future split |
+| `publish()` only after commit; handlers must tolerate being skipped | Delivery is best-effort (§17) |
+| Every schema change is a new hand-written SQL migration | §14.5 |
 
 ---
 
@@ -2035,57 +2161,30 @@ checked in, complete, and sufficient to boot.
 
 ### 22.1 Variables
 
+*Rewritten for the current implementation.* `.env.example` is the authoritative list:
+
 ```
-# ─ Shared ────────────────────────────────────────────────
-NODE_ENV=development
-LOG_LEVEL=debug
-
-# ─ PostgreSQL ────────────────────────────────────────────
-POSTGRES_HOST=postgres
-POSTGRES_PORT=5432
-POSTGRES_SUPERUSER=postgres
-POSTGRES_SUPERUSER_PASSWORD=change-me-locally
-APP_DB_USER=app_user            # non-superuser, NOBYPASSRLS — §13.5
-APP_DB_PASSWORD=change-me-locally
-MIGRATOR_DB_USER=app_migrator   # DDL only
-MIGRATOR_DB_PASSWORD=change-me-locally
-# databases: auth_db · tenant_db · core_db · resource_db · audit_db
-
-# ─ Redis ─────────────────────────────────────────────────
-REDIS_HOST=redis
-REDIS_PORT=6379
-
-# ─ Kafka ─────────────────────────────────────────────────
-KAFKA_BROKERS=kafka:9092
-KAFKA_CLIENT_ID_PREFIX=mtsm
-
-# ─ Secrets — MUST be distinct (§10.5) ────────────────────
-JWT_SECRET=dev-only-replace-me
-JWT_ACCESS_EXPIRES_IN=15m
-JWT_REFRESH_EXPIRES_IN=7d
-INTERNAL_SIGNING_SECRET=dev-only-replace-me-differently
-INTERNAL_CONTEXT_TTL_SECONDS=30
-
-# ─ Security ──────────────────────────────────────────────
-CORS_ORIGINS=http://localhost:5178
-THROTTLE_TTL=60
-THROTTLE_LIMIT=100
-THROTTLE_AUTH_LIMIT=5           # stricter on /auth/login and /onboarding/signup
-
-# ─ Argon2 (§11.6) ────────────────────────────────────────
-ARGON2_MEMORY_COST=19456
-ARGON2_TIME_COST=2
-ARGON2_PARALLELISM=1
-
-# ─ Frontend ──────────────────────────────────────────────
-VITE_API_BASE_URL=http://localhost:3000/api/v1
+# ─ Shared ─          NODE_ENV, LOG_LEVEL
+# ─ PostgreSQL ─      POSTGRES_HOST, POSTGRES_PORT, POSTGRES_SUPERUSER, POSTGRES_SUPERUSER_PASSWORD,
+#                     DB_NAME=app_db, APP_DB_USER=app_user, APP_DB_PASSWORD,
+#                     MIGRATOR_DB_USER=app_migrator, MIGRATOR_DB_PASSWORD,
+#                     (optional) DATABASE_URL, MIGRATOR_DATABASE_URL
+# ─ Tokens ─          JWT_SECRET, JWT_ACCESS_EXPIRES_IN=15m, JWT_REFRESH_EXPIRES_IN=7d (whole days)
+# ─ Security ─        CORS_ORIGINS, THROTTLE_TTL_MS, THROTTLE_LIMIT,
+#                     THROTTLE_STRICT_TTL_MS, THROTTLE_STRICT_LIMIT
+# ─ Platform admin ─  PLATFORM_ADMIN_EMAIL, PLATFORM_ADMIN_PASSWORD (>= 12 chars; empty skips seed)
+# ─ Frontend ─        VITE_API_BASE_URL
 ```
+
+Removed with the rewrite: the five `*_DB_NAME` variables, `REDIS_*`, `KAFKA_*`,
+`INTERNAL_SIGNING_SECRET`, `INTERNAL_CONTEXT_TTL_SECONDS`, the `*_SERVICE_URL`s, `THROTTLE_TTL` /
+`THROTTLE_AUTH_LIMIT` (renamed), and the `ARGON2_*` knobs.
 
 ### 22.2 Validation
 
-Each service validates its own environment at boot with a schema, via `@nestjs/config` with
-`validationSchema`. A missing or malformed variable **fails startup loudly** rather than surfacing
-as a null at request time. Startup also asserts the database role is non-superuser and
+`backend/src/config/env.ts` reads every variable through a getter; a missing required variable
+throws where it is first used (at boot for the database URL and the RLS check) rather than
+surfacing as a null deep in a request. Startup also asserts the database role is non-superuser and
 `NOBYPASSRLS` (§13.8) — a misconfigured deployment refuses to boot rather than quietly disabling
 tenant isolation.
 
@@ -2345,6 +2444,8 @@ in a post-incident review.
 
 ### 26.4 Health and readiness
 
+> **Superseded (see §0).** One process now exposes `GET /api/v1/health` (`{status}`) and `GET /api/v1/health/ready` (`{status, database}` — Postgres is the only dependency left). Both are public and unthrottled; there is no `InternalContextGuard` exemption to reason about.
+
 Each service exposes `/health` (liveness — process is up) and `/health/ready` (readiness — database
 reachable, Kafka connected, Redis reachable). Compose uses these for dependency ordering so
 `docker compose up` comes up cleanly without manual retries.
@@ -2371,58 +2472,56 @@ why structured logging was chosen over ad-hoc strings.
 
 ## 27. Docker / Infrastructure
 
+*Rewritten for the current implementation.*
+
 ### 27.1 Containers
 
 | Container | Image | Ports | Why |
 |---|---|---|---|
 | `postgres` | `postgres:17-alpine` | internal | The source of truth. RLS + row locks |
-| `redis` | `redis:8-alpine` | internal | §16 — three narrow jobs |
-| `kafka` | `bitnami/kafka` (**KRaft**) | internal | §17 — event backbone. KRaft removes ZooKeeper |
-| `api-gateway` | local build | **3000 → host** | The only public backend entry point |
-| `auth-service` | local build | internal | |
-| `tenant-service` | local build | internal | |
-| `user-service` | local build | internal | |
-| `subscription-service` | local build | internal | |
-| `resource-service` | local build | internal | |
-| `audit-service` | local build | internal | |
-| `frontend` | local build | **5178 → host** | SPA |
+| `migrator` | `backend/Dockerfile.migrator` (one-shot) | — | `prisma migrate deploy` as `app_migrator`, then the platform-admin seed, then exits |
+| `backend` | `backend/Dockerfile` | **127.0.0.1:3000** | The Express process — the only backend entry point |
+| `frontend` | `frontend/Dockerfile` | **127.0.0.1:5178** | SPA (nginx serving the static build) |
 
-**Eleven containers, two published ports.** Every backend service except the gateway is unreachable
-from the host — which is §10.5's network layer, expressed in configuration rather than in prose.
+**Four containers, two published ports**, both bound to `127.0.0.1`. No broker, no cache.
 
 ### 27.2 Database initialisation
 
-`docker/postgres/init.sql`, run once on first boot:
+`docker/postgres/init.sh`, run by the postgres image on first boot of an **empty** volume:
 
-1. Create the five databases.
-2. Create `app_migrator` (DDL on all five) and `app_user` (DML only, **no superuser, `NOBYPASSRLS`,
-   not table owner**).
-3. Grant `user-service`'s role `SELECT`/`UPDATE` on `subs.subscriptions` only — the single
-   documented cross-schema grant (§14.2).
-4. Revoke `PUBLIC` schema creation rights.
+1. Create the one database, `app_db` (`DB_NAME`).
+2. Create `app_migrator` (`LOGIN NOSUPERUSER NOBYPASSRLS CREATEDB`), `app_user`
+   (`LOGIN NOSUPERUSER NOBYPASSRLS`) and `app_rls_bypass` (`NOLOGIN BYPASSRLS`, granted to
+   `app_migrator` so ownership of the lookup functions can be transferred to it).
+3. Grant `app_migrator` `CREATE` on the database (for `citext` / `pgcrypto`) and schema `public`;
+   `app_user` `USAGE` only; revoke `CREATE` on `public` from `PUBLIC`.
 
-Step 2 is what makes §13's guarantee real rather than aspirational: the runtime credential is
-*incapable* of bypassing RLS.
+Table privileges are **not** granted here — the migration grants them per table, which keeps the
+audit tables append-only and `plans` read-only for `app_user`. Step 2 is what makes §13's guarantee
+real: the runtime credential is incapable of bypassing RLS, and the backend verifies that at boot.
+
+An existing volume created by the old five-database `init.sh` has no `app_db`; run
+`docker compose down -v` (destroys local data) before the first `up` (§0.6).
 
 ### 27.3 Startup ordering
 
-`depends_on` with `condition: service_healthy` chains infrastructure → migrations → services →
-gateway → frontend. A one-shot `migrator` container runs every service's migrations as
-`app_migrator` and exits before application services start, so no service races a schema.
-
-Seed data (three plans: free/pro/enterprise; one platform admin) is loaded by the same one-shot
-container, making `docker compose up` genuinely sufficient — the brief's requirement.
+`postgres` (healthy) → `migrator` (`service_completed_successfully`) → `backend` (healthcheck
+`curl /api/v1/health/ready`) → `frontend` (`service_started`). `run-migrations.sh` runs under
+`set -euo pipefail`, so a failed migration exits non-zero and the backend never starts against a
+half-created schema. Seed data (three plans in the migration; one platform admin from
+`PLATFORM_ADMIN_*`) makes `docker compose up` sufficient on its own.
 
 ### 27.4 Not included
 
-Kubernetes · service mesh · Prometheus/Grafana · Elasticsearch · RabbitMQ · ZooKeeper (KRaft) ·
-nginx (the gateway is the entry point; a second reverse proxy adds a hop and no capability).
+Kubernetes · service mesh · Prometheus/Grafana · Elasticsearch · Kafka · Redis · a reverse proxy.
 
 ---
 
 ## 28. Testing Strategy
 
 ### 28.1 Pyramid
+
+> **Superseded (see §0).** Current layout: `backend/tests/unit` (Jest, models and the bus mocked — `pnpm test`), `backend/tests/integration` and `backend/tests/http` (real Postgres via Testcontainers, the latter black-box through `createApp()` with Supertest — `pnpm test:integration`), shared helper `backend/tests/support/postgres-test-container.ts`. File paths below that start with `test/integration/<service>/` refer to the old monorepo. T1–T4 remain the tests that matter most.
 
 | Level | Tool | Scope |
 |---|---|---|
@@ -2553,6 +2652,8 @@ explicitly rejects loading everything into memory and filtering in code.
 
 ## 30. Failure Handling
 
+> **Superseded (see §0).** §30.1 is unchanged except that idempotency relies only on the unique constraint (no Redis fast path) and the saga table is `onboarding_sagas` in `app_db`. In §30.2 the Kafka, Redis, downstream-service and consumer rows no longer apply: an event-handler failure is logged and dropped (§17), rate limiting cannot fail independently, and the denylist fails closed on a database error. §30.3's conclusion is stronger now — PostgreSQL is the only infrastructure dependency left.
+
 ### 30.1 Onboarding partial failure (R4)
 
 The explicit requirement: a half-created organisation must not block a retry or leave orphaned data.
@@ -2663,15 +2764,21 @@ which is why §19 is written as a reusable pattern rather than a one-off.
 
 ### 32.2 Deviation from the brief's stated stack
 
-The brief's header specifies *Express or Next.js · PostgreSQL · Prisma*. This architecture uses
-**NestJS microservices + TypeORM**, per the project's own constraints, which override it. PostgreSQL
-is unchanged — and it is the component every graded guarantee actually rests on (§13, §19). The
-functional requirements in the brief's §3–§8 are stack-agnostic and are met in full (Appendix A).
+*Updated.* The brief's header specifies *Express or Next.js · PostgreSQL · Prisma*. The first
+implementation used **NestJS microservices + TypeORM** (plus Kafka and Redis) per the project's
+constraints at the time. The backend has since been rewritten to **Express + Prisma**, so the stack
+now matches the brief. The rewrite preserved external behaviour exactly (a 99-step black-box HTTP
+diff against the old stack, zero differences), including the quirks listed in §0.5. PostgreSQL — the
+component every graded guarantee rests on (§13, §19) — is unchanged, as are its RLS policies,
+SECURITY DEFINER functions and `CHECK` constraints.
 
-Worth stating plainly in a walkthrough rather than glossing: the substitution was directed, and
-nothing in the brief's requirements depends on the framework or ORM it happened to name.
+The one remaining deviation worth naming: Prisma is used as a query client only. The schema is
+owned by hand-written SQL migrations, because Prisma's schema language cannot express RLS, grants or
+SECURITY DEFINER functions (§14.5, §15).
 
 ### 32.3 Implementation-phase tracked gaps
+
+> **Superseded (see §0).** These entries were written against the microservice implementation and name its services and classes. Their status in the monolith: the suspended-org login gap is still open (§0.5 #8); the 503-until-Kafka window is closed in practice because the plan-limit handler is awaited during signup (§0.4); the storage-ceiling clamp (`GREATEST(...)` in `models/plan-limit-cache.model.ts`) is unchanged; real `used_seats` drift detection is still not built (only `missing-subscription-alarm.handler.ts`), though it no longer needs a cross-service read; the `/auth/refresh` public-route resolution stands (four public routes); the `core_db` migration-sequencing note is moot with one migration. The current list of kept behaviours is §0.5.
 
 Gaps surfaced during implementation that cannot be closed until a *later* service exists, or that
 were deliberately deferred as a stated limitation rather than built now — tracked here so they are
@@ -2766,6 +2873,8 @@ shared-database decision §14.2 already made; the alternative (a throwaway table
 would declare the table's real owner twice and disrupt local dev data for no benefit.
 
 ### 32.4 Implementation-phase defects caught and fixed
+
+> **Superseded (see §0).** Historical record from the microservice implementation. Defects tied to removed machinery (unsigned internal HTTP, `InternalHttpClient`, Nest middleware ordering, Kafka consumers, per-service grants) cannot recur. The database-level lessons — `set_config` instead of `SET LOCAL`, the `NULLIF` wrapper, SECURITY DEFINER functions owned by a `BYPASSRLS` role, no `ALTER DEFAULT PRIVILEGES` blanket grants — are all carried into `0001_init` and still apply to every new migration.
 
 Unlike §32.3's open gaps, these were real defects introduced during implementation and closed
 before the affected service was committed. Recorded because the same mistake is exactly the kind a
@@ -3035,13 +3144,13 @@ later service could reintroduce if the reason it was wrong is forgotten.
 | # | Decision | Alternatives rejected | Why |
 |---|---|---|---|
 | D1 | PostgreSQL RLS for tenant isolation | Repository-only filtering; middleware query rewriting | Only RLS survives a developer forgetting, and covers raw SQL |
-| D2 | 7 services | 3–4 merged; 10+ granular | Each of the 7 owns distinct data with a distinct access profile (§7.2, §7.3) |
-| D3 | `core_db` shared by user + subscription | Separate DBs + saga; 2PC | A provable ACID guarantee beats a more distributed diagram (§14.2) |
+| D2 | 7 services — *superseded by D18* | 3–4 merged; 10+ granular | Each of the 7 owns distinct data with a distinct access profile (§7.2, §7.3) |
+| D3 | `core_db` shared by user + subscription — *superseded by D18 (one database)* | Separate DBs + saga; 2PC | A provable ACID guarantee beats a more distributed diagram (§14.2) |
 | D4 | Row lock + authoritative `used_seats` + `CHECK` | Redis lock; optimistic; Kafka; live `count(*)` on the hot path | Transactional and correct under partition; one quantity, not two (§19.4, §19.11) |
-| D5 | Kafka + Redis, narrow jobs | Either alone | Each solves a problem the other cannot (§18.2) |
-| D6 | CASL in services, coarse checks at gateway | Gateway-only; service-only | The gateway lacks the subject (§12.4) |
+| D5 | Kafka + Redis, narrow jobs — *superseded by D19* | Either alone | Each solves a problem the other cannot (§18.2) |
+| D6 | CASL in services, coarse checks at gateway — *now both in one process (§12.4 note)* | Gateway-only; service-only | The gateway lacks the subject (§12.4) |
 | D7 | `AsyncLocalStorage` for context | Request-scoped DI; parameter threading | Reaches TypeORM internals, where scoping must apply (§13.4) |
-| D8 | REST + signed header between services | gRPC; NestJS TCP transport | Debuggable with curl; no codegen; signature prevents forgery (§9.4) |
+| D8 | REST + signed header between services — *superseded by D18 (direct calls)* | gRPC; NestJS TCP transport | Debuggable with curl; no codegen; signature prevents forgery (§9.4) |
 | D9 | No client state library | Redux; Zustand | Server state is the only real state (§23.1) |
 | D10 | `404` on cross-tenant access | `403` | `403` is an existence oracle (§13.9) |
 | D11 | Forward-recovery onboarding saga | Compensating deletion | Safer under retry races; preserves evidence (§30.1) |
@@ -3051,3 +3160,6 @@ later service could reintroduce if the reason it was wrong is forgotten.
 | D15 | Downgrade below current usage blocked | Grandfather until usage falls | Keeps the §19.4 `CHECK` invariant unconditionally true (D-Q4) |
 | D16 | Invitation-accept is the third `@Public()` route | Require auth; pre-create the account | An invitee has no account yet; the single-use hashed token is the credential and carries its own tenant scope (§11.5) |
 | D17 | Email stubbed, not delivered | MailHog container | The invite flow is fully modelled and audited without SMTP (D-Q6) |
+| D18 | One Express + Prisma process, one database, MVC modules (§0) | Keep 7 NestJS services / 5 databases | Matches the brief's stated stack; removes a gateway, internal signing and cross-service grants that existed only because of the split; RLS and row locks — the graded guarantees — are unchanged |
+| D19 | In-process event bus; Postgres denylist; in-memory throttle (§0.4) | Keep Kafka + Redis | One process needs no broker for fan-out; the denylist is correct in Postgres; per-process rate limiting is acceptable for one replica. Costs named in §18 note |
+| D20 | Hand-written SQL migrations, Prisma as client only | `prisma migrate dev` generated migrations | Prisma cannot express RLS, `FORCE`, grants or SECURITY DEFINER functions (§14.5) |

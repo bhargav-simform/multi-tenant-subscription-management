@@ -1,0 +1,289 @@
+// Prisma models for the single app database.
+//
+// The schema itself (constraints, RLS policies, SECURITY DEFINER functions, grants)
+// is owned by the hand-written SQL in migrations/ — Prisma cannot express RLS, so
+// never regenerate that migration with `prisma migrate dev`. These models only have
+// to match it for the client to read and write the tables.
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── Enums ───────────────────────────────────────────────────────────────────
+
+enum CredentialStatus {
+  active
+  disabled
+
+  @@map("credentials_status_enum")
+}
+
+enum OrganizationStatus {
+  provisioning
+  active
+  provisioning_failed
+  suspended
+
+  @@map("organizations_status_enum")
+}
+
+enum OnboardingSagaState {
+  pending
+  org_created
+  credentials_created
+  subscribed
+  complete
+
+  @@map("onboarding_sagas_state_enum")
+}
+
+enum UserRole {
+  org_admin
+  org_member
+
+  @@map("users_role_enum")
+}
+
+enum UserStatus {
+  active
+  removed
+
+  @@map("users_status_enum")
+}
+
+enum PlanCode {
+  free
+  pro
+  enterprise
+
+  @@map("plans_code_enum")
+}
+
+enum SubscriptionStatus {
+  active
+  cancelled
+
+  @@map("subscriptions_status_enum")
+}
+
+// ─── Registry tables (no RLS) ────────────────────────────────────────────────
+
+model Credential {
+  id             String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId         String           @map("user_id") @db.Uuid
+  /// NULL = platform admin.
+  organizationId String?          @map("organization_id") @db.Uuid
+  email          String           @unique(map: "uq_credentials_email") @db.Citext
+  passwordHash   String           @map("password_hash")
+  status         CredentialStatus @default(active)
+  createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime         @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  refreshTokens  RefreshToken[]
+
+  @@index([userId], map: "idx_credentials_user_id")
+  @@map("credentials")
+}
+
+model RefreshToken {
+  id           String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  credentialId String     @map("credential_id") @db.Uuid
+  tokenHash    String     @unique(map: "uq_refresh_tokens_token_hash") @map("token_hash") @db.VarChar(64)
+  expiresAt    DateTime   @map("expires_at") @db.Timestamptz
+  revokedAt    DateTime?  @map("revoked_at") @db.Timestamptz
+  replacedBy   String?    @map("replaced_by") @db.Uuid
+  createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz
+  credential   Credential @relation(fields: [credentialId], references: [id], onDelete: Cascade)
+
+  @@index([credentialId], map: "idx_refresh_tokens_credential_id")
+  @@map("refresh_tokens")
+}
+
+model RevokedAccessToken {
+  jti       String   @id @db.Uuid
+  expiresAt DateTime @map("expires_at") @db.Timestamptz
+
+  @@index([expiresAt], map: "idx_revoked_access_tokens_expires_at")
+  @@map("revoked_access_tokens")
+}
+
+model Organization {
+  id        String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String             @db.VarChar(255)
+  slug      String             @unique(map: "uq_organizations_slug") @db.VarChar(255)
+  status    OrganizationStatus @default(provisioning)
+  createdAt DateTime           @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime           @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([createdAt(sort: Desc), id], map: "idx_organizations_created_at")
+  @@map("organizations")
+}
+
+model OnboardingSaga {
+  id             String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  idempotencyKey String              @unique(map: "uq_onboarding_sagas_idempotency_key") @map("idempotency_key") @db.VarChar(255)
+  organizationId String?             @map("organization_id") @db.Uuid
+  state          OnboardingSagaState @default(pending)
+  adminEmail     String              @map("admin_email") @db.VarChar(255)
+  adminUserId    String?             @map("admin_user_id") @db.Uuid
+  lastError      String?             @map("last_error")
+  failedAt       DateTime?           @map("failed_at") @db.Timestamptz
+  attempts       Int                 @default(0)
+  createdAt      DateTime            @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime            @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([organizationId], map: "idx_onboarding_sagas_org")
+  @@map("onboarding_sagas")
+}
+
+// ─── Global reference data ───────────────────────────────────────────────────
+
+model Plan {
+  id               String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code             PlanCode              @unique(map: "uq_plans_code")
+  name             String                @db.VarChar(255)
+  maxUsers         Int                   @map("max_users")
+  maxStorageBytes  BigInt                @map("max_storage_bytes")
+  isActive         Boolean               @default(true) @map("is_active")
+  subscriptions    Subscription[]
+  historyEntriesTo SubscriptionHistory[]
+
+  @@map("plans")
+}
+
+// ─── Tenant tables (FORCE RLS on organization_id) ────────────────────────────
+
+model User {
+  id             String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String     @map("organization_id") @db.Uuid
+  email          String     @db.Citext
+  firstName      String     @map("first_name") @db.VarChar(255)
+  lastName       String     @map("last_name") @db.VarChar(255)
+  role           UserRole
+  status         UserStatus @default(active)
+  createdAt      DateTime   @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime   @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  deletedAt      DateTime?  @map("deleted_at") @db.Timestamptz
+
+  @@unique([organizationId, email], map: "uq_users_org_email")
+  @@index([organizationId, createdAt(sort: Desc), id], map: "idx_users_org_created")
+  @@map("users")
+}
+
+model Invitation {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  email          String    @db.Citext
+  role           UserRole
+  tokenHash      String    @unique(map: "uq_invitations_token_hash") @map("token_hash") @db.VarChar(64)
+  expiresAt      DateTime  @map("expires_at") @db.Timestamptz
+  acceptedAt     DateTime? @map("accepted_at") @db.Timestamptz
+  revokedAt      DateTime? @map("revoked_at") @db.Timestamptz
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz
+
+  // Also: partial unique index uq_invitations_org_email_pending (SQL only).
+  @@index([organizationId, acceptedAt, expiresAt], map: "idx_invitations_org_status")
+  @@map("invitations")
+}
+
+model Subscription {
+  id                 String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId     String             @unique(map: "uq_subscriptions_org") @map("organization_id") @db.Uuid
+  planId             String             @map("plan_id") @db.Uuid
+  status             SubscriptionStatus @default(active)
+  usedSeats          Int                @default(0) @map("used_seats")
+  maxSeatsSnapshot   Int                @map("max_seats_snapshot")
+  usedStorageBytes   BigInt             @default(0) @map("used_storage_bytes")
+  maxStorageSnapshot BigInt             @map("max_storage_snapshot")
+  currentPeriodEnd   DateTime?          @map("current_period_end") @db.Timestamptz
+  version            Int                @default(0)
+  createdAt          DateTime           @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt          DateTime           @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  plan               Plan               @relation(fields: [planId], references: [id], map: "fk_subscriptions_plan")
+
+  @@map("subscriptions")
+}
+
+model SubscriptionHistory {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  fromPlanId     String?   @map("from_plan_id") @db.Uuid
+  toPlanId       String    @map("to_plan_id") @db.Uuid
+  changedBy      String    @map("changed_by") @db.Uuid
+  changedAt      DateTime  @default(now()) @map("changed_at") @db.Timestamptz
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz
+  toPlan         Plan      @relation(fields: [toPlanId], references: [id])
+
+  @@index([organizationId, changedAt(sort: Desc)], map: "idx_subscription_history_org_changed")
+  @@map("subscription_history")
+}
+
+model Resource {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  name           String    @db.VarChar(255)
+  description    String?
+  sizeBytes      BigInt    @map("size_bytes")
+  createdBy      String    @map("created_by") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz
+
+  @@index([organizationId, createdAt(sort: Desc), id], map: "idx_resources_org_created")
+  @@index([organizationId, sizeBytes(sort: Desc), id], map: "idx_resources_org_size")
+  @@map("resources")
+}
+
+model PlanLimitCache {
+  organizationId   String   @id @map("organization_id") @db.Uuid
+  maxStorageBytes  BigInt   @map("max_storage_bytes")
+  usedStorageBytes BigInt   @default(0) @map("used_storage_bytes")
+  updatedAt        DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@map("plan_limit_cache")
+}
+
+// ─── Audit (append-only; app_user has SELECT + INSERT only) ──────────────────
+
+model AuditEvent {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId        String   @unique(map: "uq_audit_events_event_id") @map("event_id") @db.Uuid
+  eventType      String   @map("event_type") @db.VarChar(100)
+  organizationId String?  @map("organization_id") @db.Uuid
+  actorUserId    String?  @map("actor_user_id") @db.Uuid
+  correlationId  String   @map("correlation_id") @db.Uuid
+  severity       String   @db.VarChar(16)
+  payload        Json
+  occurredAt     DateTime @map("occurred_at") @db.Timestamptz
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  @@index([organizationId, occurredAt(sort: Desc), id], map: "idx_audit_events_org_occurred")
+  @@index([correlationId], map: "idx_audit_events_correlation")
+  @@map("audit_events")
+}
+
+model SecurityEvent {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId        String   @unique(map: "uq_security_events_event_id") @map("event_id") @db.Uuid
+  eventType      String   @map("event_type") @db.VarChar(100)
+  organizationId String?  @map("organization_id") @db.Uuid
+  actorUserId    String?  @map("actor_user_id") @db.Uuid
+  correlationId  String   @map("correlation_id") @db.Uuid
+  severity       String   @db.VarChar(16)
+  payload        Json
+  occurredAt     DateTime @map("occurred_at") @db.Timestamptz
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  @@index([organizationId, occurredAt(sort: Desc), id], map: "idx_security_events_org_occurred")
+  @@index([correlationId], map: "idx_security_events_correlation")
+  @@map("security_events")
+}

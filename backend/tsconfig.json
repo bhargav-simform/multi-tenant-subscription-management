@@ -1,78 +1,24 @@
 {
   "compilerOptions": {
-    "module": "commonjs",
-    "declaration": true,
-    "removeComments": true,
-    "emitDecoratorMetadata": true,
-    "experimentalDecorators": true,
-    "allowSyntheticDefaultImports": true,
+    "module": "node16",
+    "moduleResolution": "node16",
     "target": "ES2022",
-    "sourceMap": true,
+    "lib": ["ES2022"],
     "outDir": "./dist",
-    "baseUrl": "./",
-    "incremental": true,
-    "skipLibCheck": true,
+    "rootDir": ".",
     "strict": true,
-    "strictNullChecks": true,
     "noImplicitAny": true,
-    "strictBindCallApply": true,
-    "forceConsistentCasingInFileNames": true,
+    "strictNullChecks": true,
     "noFallthroughCasesInSwitch": true,
     "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
     "resolveJsonModule": true,
-    "moduleResolution": "node",
-    "paths": {
-      "@app/common": [
-        "libs/common/src"
-      ],
-      "@app/common/*": [
-        "libs/common/src/*"
-      ],
-      "@app/tenant-context": [
-        "libs/tenant-context/src"
-      ],
-      "@app/tenant-context/*": [
-        "libs/tenant-context/src/*"
-      ],
-      "@app/database": [
-        "libs/database/src"
-      ],
-      "@app/database/*": [
-        "libs/database/src/*"
-      ],
-      "@app/auth": [
-        "libs/auth/src"
-      ],
-      "@app/auth/*": [
-        "libs/auth/src/*"
-      ],
-      "@app/authorization": [
-        "libs/authorization/src"
-      ],
-      "@app/authorization/*": [
-        "libs/authorization/src/*"
-      ],
-      "@app/kafka": [
-        "libs/kafka/src"
-      ],
-      "@app/kafka/*": [
-        "libs/kafka/src/*"
-      ],
-      "@app/redis": [
-        "libs/redis/src"
-      ],
-      "@app/redis/*": [
-        "libs/redis/src/*"
-      ],
-      "@app/logging": [
-        "libs/logging/src"
-      ],
-      "@app/logging/*": [
-        "libs/logging/src/*"
-      ],
-      "@casl/ability": [
-        "./node_modules/@casl/ability/dist/types/index.d.ts"
-      ]
-    }
-  }
+    "forceConsistentCasingInFileNames": true,
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "skipLibCheck": true,
+    "sourceMap": true,
+    "types": ["node", "jest"]
+  },
+  "include": ["src/**/*.ts", "prisma/**/*.ts", "tests/**/*.ts", "prisma.config.ts"]
 }

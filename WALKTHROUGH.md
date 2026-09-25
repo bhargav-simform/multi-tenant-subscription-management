@@ -1,43 +1,61 @@
 # Walkthrough: What Was Built, Feature by Feature
 
-This maps every piece of the system — backend services (already built, explained
-here in depth) and the frontend (built in this session) — back to
+This maps every piece of the system — the backend and the frontend — back to
 `docs/architecture/POC-BRIEF.md`'s requirements, section by section, with actual
 file paths so you can jump straight to the code.
 
-**Reading order:** Part A covers the backend — the seven services, the data model,
-and the two hard-case mechanisms (H1 tenant isolation, H2 concurrency) that
-everything else in the brief is subordinate to. Part B covers the frontend, built
-on top of that backend. Part C covers two real backend bugs found and fixed while
-wiring the frontend to it.
+**Reading order:** Part A covers the backend — its shape, the data model, and the
+two hard-case mechanisms (H1 tenant isolation, H2 concurrency) that everything else
+in the brief is subordinate to. Part B covers the frontend, built on top of that
+backend. Part C records two real backend bugs found while wiring the frontend to the
+*original* microservice backend — kept as history.
+
+> **Backend rewrite note.** The backend was originally seven NestJS + TypeORM
+> services over five databases, with Kafka and Redis. It is now **one Express 5 +
+> Prisma 7 process** (`backend/src`) against **one database** (`app_db`), with
+> identical external API behaviour (verified by a 99-step black-box HTTP diff against
+> the old stack). The RLS, locking and security mechanisms below are unchanged in
+> substance; only where they live has moved. Old → new names: `users.users` →
+> `users`, `users.invitations` → `invitations`, `subs.subscriptions` →
+> `subscriptions`, `subs.plans` → `plans`; each old service is now a set of
+> `routes/ controllers/ services/ models/ views/` files.
 
 ---
 
 # Part A — Backend
 
-## The seven services and who owns what data
+## The shape: one process, MVC, one database
 
-| Service | Owns | Entities |
+| Layer | Where | Responsibility |
 |---|---|---|
-| `api-gateway` | Nothing persistent — pure proxy + JWT↔internal-context translation | none |
-| `auth-service` | Credentials, refresh tokens | `Credential`, `RefreshToken` |
-| `tenant-service` | Organisations, the onboarding saga | `Organization`, `OnboardingSaga` |
-| `user-service` | Users, invitations, a read-only view of seats | `User`, `Invitation`, `SubscriptionSeatView` |
-| `subscription-service` | Plans (global catalogue), subscriptions, subscription history | `Plan`, `Subscription`, `SubscriptionHistory` |
-| `resource-service` | Resources (the H1 test target), a storage-limit cache | `Resource`, `PlanLimitCache` |
-| `audit-service` | Audit events, security events | `AuditEvent`, `SecurityEvent` |
+| Routes | `backend/src/routes/*.routes.ts` | Path + the per-route middleware chain: `throttle → authenticate \| anonymous → [requirePlatformAdmin] → authorize(action, subject) → validate → controller` |
+| Controllers | `backend/src/controllers/` | HTTP in/out only |
+| Services | `backend/src/services/` | Business logic, transactions, limit checks, `publish()` after commit |
+| Models | `backend/src/models/` | Prisma queries and tagged raw SQL, one file per table; every function takes a transaction client |
+| Views | `backend/src/views/` | Domain object → the exact response body the API has always returned |
+| Event handlers | `backend/src/events/handlers/` | In-process replacements for the old Kafka consumers |
 
-**Why seven, not one monolith:** each service is independently deployable and
-independently scalable, and — the point that matters most for this POC — each
-service's database connection is the **only** thing that can read or write its own
-tables. There is no shared "god" database role with access to everything, so a bug
-in one service's queries cannot leak another service's tables even in principle.
+The old bounded contexts survive as **file groupings**, not processes: auth
+(`auth.service`, `credentials.service`, `token-issuer.service`,
+`token-denylist.service`), tenancy/onboarding (`organizations.*`, `onboarding.*`),
+users (`users.*`, `invitations.*`), subscriptions (`subscriptions.*`, `plans.*`,
+`usage.*`), resources (`resources.*`), audit (`audit.*` + the audit/security sinks).
+A cross-module call is a plain function call — there is no gateway, no internal
+HTTP, no signed internal header.
 
-Only `api-gateway` has a **published port** — the other six sit on an internal
-Docker bridge network with no port mapping at all. A client (browser, curl,
-anything) can *only* ever reach the gateway; the six data-owning services are
-unreachable directly, which is the first, coarsest layer of the isolation story
-(§10.5 "layer 1").
+What replaced the infrastructure:
+
+| Was | Now |
+|---|---|
+| Kafka topics + consumers | `lib/events` — an in-process bus. `publish()` after commit; handlers are awaited in-process, failures logged and swallowed, no retry/DLQ |
+| Redis logout denylist | `revoked_access_tokens` table, checked on every authenticated request (fails **closed**), purged hourly |
+| Redis-backed throttler | In-memory fixed window per process (same headers and 429 body; per-replica) |
+| Redis onboarding claim | The `onboarding_sagas.idempotency_key` unique constraint (the Redis claim was only ever logged) |
+| `consumed_events` dedupe tables | Gone — there is no redelivery to dedupe |
+| 5 databases, per-service roles | One `app_db`, three roles: `app_migrator` (DDL), `app_user` (DML, `NOBYPASSRLS`), `app_rls_bypass` (`NOLOGIN`, owns the SECURITY DEFINER lookups) |
+
+Only the backend (`127.0.0.1:3000`) and the frontend (`127.0.0.1:5178`) have
+published ports; Postgres is reachable only on the internal Docker network.
 
 ---
 
@@ -50,28 +68,37 @@ undersells how specific and deliberate the implementation is.
 ### The chain, end to end
 
 1. **The client sends a JWT.** Nothing else — no organisation ID in a header,
-   body, or query param, anywhere, ever (§13.3 — checked by grep-ability: no route
-   in the entire system accepts `organizationId` as an input).
+   body, or query param, anywhere, ever (§13.3 — no route accepts
+   `organizationId` as an input).
 
-2. **`api-gateway` verifies the JWT** and mints a **separate, HMAC-signed internal
-   header** (`x-internal-context`) carrying `{ userId, organizationId, roles,
-   correlationId }`. This is the **one and only place** a client-supplied token
-   becomes a trusted internal identity — every downstream service only ever sees
-   this signed header, never the original JWT.
+2. **`middlewares/authenticate.ts` verifies the JWT** (signature, expiry, then the
+   logout denylist) and opens **one scope** via Node's `AsyncLocalStorage`
+   (`lib/context-store.ts`) carrying `{ userId, organizationId, roles,
+   correlationId }` from the token's claims. This is the **one and only place** a
+   client-supplied token becomes a trusted identity; no other layer reads identity
+   from `req`. Public routes use `anonymous()` instead, which opens a scope with
+   `userId` and `organizationId` both null.
 
-3. **Each downstream service verifies that signature** (`InternalContextGuard` /
-   `TenantContextMiddleware` — see Part C for how this specific chain was broken
-   and fixed) and opens **one shared scope** via Node's `AsyncLocalStorage` for the
-   rest of that request.
+3. **Every tenant query runs inside a `lib/tenant-db.ts` transaction.**
+   `transaction(work)` opens a Prisma interactive `$transaction` and, as its first
+   statement, runs
 
-4. **Every tenant-owning query runs through a connection that has
-   `SET LOCAL app.current_org = '<the org id from that scope>'`** for the duration
-   of the request — this is what `TenantAwareDataSource` does before handing a
-   connection to any repository method.
+   ```sql
+   SELECT set_config('app.current_org', $1, true)   -- true = transaction-local
+   ```
 
-5. **PostgreSQL itself, not application code, filters every row.** Every tenant
-   table has an RLS policy created in the exact migration that creates the table
-   (`libs/database/src/data-source/rls-migration.helper.ts`):
+   with the org from the scope. `set_config(..., true)` rather than `SET LOCAL`
+   because `SET` cannot take a bind parameter, and an org id is not something to
+   interpolate into SQL. Because it is transaction-local it can never leak onto
+   the next request that reuses the pooled connection. The siblings
+   `transactionForOrganization(orgId, work)` (event handlers, jobs),
+   `transactionWithDeferredScope(work)` (invitation acceptance, which must look up
+   the org first) and `runGlobal(work)` (the explicit, logged, unscoped escape
+   hatch) cover every other case.
+
+4. **PostgreSQL itself, not application code, filters every row.** Every tenant
+   table has an RLS policy created in the same migration that creates the table
+   (`backend/prisma/migrations/0001_init/migration.sql`):
 
    ```sql
    ALTER TABLE "resources" ENABLE ROW LEVEL SECURITY;
@@ -80,6 +107,10 @@ undersells how specific and deliberate the implementation is.
      USING      (organization_id = NULLIF(current_setting('app.current_org', true), '')::uuid)
      WITH CHECK (organization_id = NULLIF(current_setting('app.current_org', true), '')::uuid)
    ```
+
+5. **The backend refuses to run as a role that could bypass this.** At boot,
+   `assertRlsSafeRole()` checks `pg_roles` for the connected role and exits if it
+   is a superuser or has `BYPASSRLS`.
 
 ### Why `FORCE ROW LEVEL SECURITY` is the one line that makes this real
 
@@ -92,10 +123,13 @@ developer forgets the tenant filter on a new query"*:
 
 > A careless `SELECT * FROM resources` with no `WHERE` clause at all still only
 > returns the caller's own organisation's rows. There is no filter to forget — the
-> database enforces it on every query issued through this connection, regardless
+> database enforces it on every query issued in the scoped transaction, regardless
 > of what that query's author intended, because `FORCE ROW LEVEL SECURITY` applies
 > the policy unconditionally, and `USING (organization_id = current_setting(...))`
 > is evaluated against **every row the query would otherwise have touched**.
+
+`resources.service.ts` keeps a deliberately WHERE-less raw query,
+`findAllResourcesForReport()`, purely so a test can demonstrate exactly this.
 
 `WITH CHECK` is the write-side twin: without it, a malicious or buggy `INSERT`
 could plant a row with someone else's `organization_id` even though the RLS
@@ -106,26 +140,27 @@ scope.
 ### The `NULLIF(..., '')` detail — a real, subtle bug this codebase already fixed once
 
 `current_setting('app.current_org', true)` returns an **empty string**, not SQL
-`NULL`, once a transaction that set it commits (Postgres reverts `SET LOCAL` to
-`''`, not back to unset, on a pooled connection). Casting `''::uuid` directly
+`NULL`, once a transaction that set it commits (a transaction-local setting reverts
+to `''`, not back to unset, on a pooled connection). Casting `''::uuid` directly
 **raises an error** rather than returning zero rows. `NULLIF(x, '')` converts that
 empty string back to a genuine `NULL` before the cast, so a connection that hasn't
 (yet) opened a tenant scope correctly evaluates to "matches nothing" — zero rows,
-not a crash. This is called out explicitly in the migration helper's own comment
-as "a live bug in production" that this exact `NULLIF` wrapper fixes.
+not a crash. The same property is why a platform admin (organizationId null → no
+scope set) sees zero tenant rows without any special-casing in application code.
 
-### The cross-tenant *detection* function — proving "not readable" vs "doesn't exist"
+### The cross-tenant *detection* functions — proving "not readable" vs "doesn't exist"
 
-`resource-service`'s migration also creates a narrow `SECURITY DEFINER` function,
-`resource_exists(uuid)`, owned by a special `app_rls_bypass` role (which has
-`BYPASSRLS` but is never connected to directly — nothing can log in as it). This
-function exists purely so an **internal tenant-leak detector** (§8's optional
-extension) can ask "does this ID exist *anywhere*, in any organisation?" — a
-question the normal, RLS-protected connection genuinely cannot answer, because a
-`FORCE`-protected table with no scope set returns *zero rows for every ID*,
-whether that ID belongs to another tenant or doesn't exist at all. Without this
-narrow escape hatch, there would be no way to distinguish those two cases even for
-legitimate internal tooling.
+The migration also creates narrow `SECURITY DEFINER` functions —
+`resource_exists(uuid)`, `user_exists(uuid)`, plus the org-id lookups
+`get_user_organization_id`, `get_invitation_organization_id` and the counters-only
+`get_usage_aggregates` — owned by `app_rls_bypass` (which has `BYPASSRLS` but is
+`NOLOGIN`: nothing can connect as it). `resource_exists` exists so the
+cross-tenant probe in `resources.service.ts` can ask "does this ID exist *anywhere*?" — a question the
+RLS-protected connection genuinely cannot answer, because a `FORCE`-protected table
+with no scope set returns *zero rows for every ID*. When a scoped read of
+`/resources/:id` or `/users/:id` finds nothing and the probe says the id exists
+elsewhere, the service publishes `CrossTenantAccessAttempted` on `security.events`
+— and still returns the **same 404** as a missing id.
 
 ---
 
@@ -135,32 +170,34 @@ legitimate internal tooling.
 individually within the remaining seat limit, that together would exceed it. The
 requirement is that **only one may succeed**.
 
-### The mechanism: `SELECT ... FOR UPDATE`, not Redis, not a distributed lock
+### The mechanism: `SELECT ... FOR UPDATE`, not a cache, not a distributed lock
 
-`apps/user-service/src/users/users.service.ts`, `invite()`:
+`backend/src/services/users.service.ts`, `invite()`:
 
 ```ts
-const invitationId = await this.tenantDataSource.transaction(async (manager) => {
-  // §19.7: subscription row locked FIRST, always, for deadlock avoidance.
-  const seat = await this.seats.lockForUpdate(organizationId, manager);
+const invitationId = await transaction(async (tx) => {
+  // Subscription row locked FIRST, always, for deadlock avoidance.
+  const seat = await seats.lockForUpdate(tx, organizationId);
 
   if (seat.usedSeats >= seat.maxSeatsSnapshot) {
     throw new PlanLimitExceededException(/* ...specific message... */);
   }
 
-  const invitation = await this.invitations.create({ ... }, manager);
-  await this.seats.adjustUsedSeats(organizationId, 1, manager);
+  const invitation = await invitations.create(tx, organizationId, { ... });
+  await seats.adjustUsedSeats(tx, organizationId, 1);
   return invitation.id;
 });
 ```
 
-`lockForUpdate` (`subscription-seat.repository.ts`) issues:
+`lockForUpdate` (`backend/src/models/subscription-seat.model.ts`) issues:
 
 ```ts
-manager.createQueryBuilder(SubscriptionSeatView, 'sub')
-  .setLock('pessimistic_write')   // ← compiles to SELECT ... FOR UPDATE
-  .where('sub.organizationId = :organizationId', { organizationId })
-  .getOne();
+await db.$queryRaw`
+  SELECT used_seats AS "usedSeats", max_seats_snapshot AS "maxSeatsSnapshot"
+  FROM subscriptions
+  WHERE organization_id = ${organizationId}::uuid
+  FOR UPDATE
+`;
 ```
 
 **Why this actually prevents the race, concretely:** when two `invite()` calls hit
@@ -169,8 +206,15 @@ the same organisation at the same instant, the *second* transaction's
 not race — until the *first* transaction commits or rolls back. By the time the
 second transaction's lock is granted, it reads the count **the first transaction
 already updated**. There is no window in which both transactions see
-"4 of 5 seats used" and both decide they're allowed to proceed — the row lock
-makes that window not exist.
+"4 of 5 seats used" and both decide they're allowed to proceed.
+
+Storage works the same way: `resources.service.ts` `create()` locks the
+org's `plan_limit_cache` row `FOR UPDATE`, checks `used + size <= max`, inserts the
+resource and increments the counter in one transaction. A plan downgrade
+(`subscriptions.service.ts` `changePlan()`) locks the subscription row and checks
+current usage against the *target* plan before writing. Prisma's interactive
+transactions are configured with a 30 s timeout and 10 s max wait
+(`lib/tenant-db.ts`), long enough for a queue of concurrent invites.
 
 ### The independent backstop: a CHECK constraint
 
@@ -182,71 +226,67 @@ CONSTRAINT "ck_subscriptions_seats" CHECK ("used_seats" <= "max_seats_snapshot")
 
 If any code path ever tried to write `used_seats` past `max_seats_snapshot`,
 PostgreSQL refuses the write outright — a second, independent line of defence that
-doesn't depend on the application getting the lock right. This is the
-"CHECK constraint as an independent backstop" the README describes for H2.
+doesn't depend on the application getting the lock right. `plan_limit_cache` and
+`subscriptions` have the equivalent storage `CHECK`s.
 
-### The actual proof — three real tests against a real PostgreSQL container
+### The proof — tests against a real PostgreSQL container
 
-`test/integration/user-service/seat-lock.integration.spec.ts` — genuinely spins up
-Postgres in a test container (not mocked, not a fake in-memory serialisation) and
-runs the app's own `app_user` role (no superuser bypass) against it:
+`backend/tests/integration/` spins up Postgres 17 in a Testcontainer (not mocked,
+not a fake in-memory serialisation) with the production role layout, applies the
+real migration, and runs the services **as `app_user`** (no superuser bypass). The
+concurrency tests there fire genuinely concurrent invite transactions against a
+nearly full organisation and assert that exactly the right number succeed, and that
+the `CHECK` constraint rejects an over-limit write even without the lock.
 
-1. **`SELECT ... FOR UPDATE genuinely blocks a concurrent reader`** — proves the
-   lock mechanism itself works, in isolation.
-2. **`two genuinely concurrent invite-shaped transactions with 1 seat free: exactly
-   one increments, one sees the limit`** — this is literally the brief's §7 test
-   requirement, run against real Postgres with real concurrent connections.
-3. **`50-burst (real Postgres): 50 concurrent invite-shaped transactions, 2 seats
-   free — exactly 2 succeed`** — this is the §8 *optional extension* ("load-test
-   plan-limit enforcement with a simulated burst of 50 concurrent invite
-   requests... show exactly the right number succeed"), already built and
-   passing.
-4. **`the CHECK constraint backstop rejects a write that would exceed the limit
-   even without the lock`** — proves the second, independent line of defence
-   actually holds, not just that it's declared in SQL.
-
-The test file's own comment draws a distinction worth repeating: there's also a
-*unit* test (`users.service.spec.ts`) that proves the transaction's *shape* —
-lock, then check, then write, in that order — but a unit test with a fake,
-unconditionally-serialising mock **cannot** detect a missing `FOR UPDATE` clause.
-Only the real-Postgres integration test can catch that regression, which is
-exactly why both exist rather than just the faster unit test.
+The distinction between unit and integration tests matters here: a *unit* test
+(`tests/unit/users.service.spec.ts`) proves the transaction's *shape* — lock, then
+check, then write, in that order — but a unit test with a mocked model **cannot**
+detect a missing `FOR UPDATE` clause. Only the real-Postgres test can catch that
+regression, which is why both exist.
 
 ---
 
-## §11 / §9.4 — The gateway: one proxy, one JWT→internal-context translation point
+## §11 / §9.4 — One entry point, one JWT→context translation point
 
-`api-gateway`'s `ProxyService` (`apps/api-gateway/src/proxy/proxy.service.ts`) is
-deliberately thin — it forwards a request to the right downstream service and does
-**no** body/response reshaping beyond normalising error shapes. The reasoning
-stated in its own doc comment: a gateway that starts rewriting bodies eventually
-has to know what a plan limit *is*, and that knowledge belongs downstream, not in
-the one component every single request passes through.
+There is no separate gateway any more: the backend *is* the one published entry
+point. What the gateway used to do is now ordinary middleware in `app.ts` and on
+each route — helmet, a CORS **allowlist** (`CORS_ORIGINS`, never reflect-any-origin),
+correlation-id minting/echoing, request logging, rate limiting and JWT
+verification. The HMAC-signed internal context header and every `/internal/*`
+endpoint are gone, because there is no second hop to authenticate.
 
-The one exception is `DashboardController` — it calls two downstream services in
-parallel (`Promise.all`) and combines the two responses into one object, purely to
-save the frontend a request waterfall on its most-visited screen. It's explicitly
-documented as *the only* aggregation allowed in the gateway, and it inspects
-neither response — it just concatenates them.
+`GET /dashboard` still combines two reads (the current subscription and the five
+most recent users) into one response to save the frontend a request waterfall on
+its most-visited screen — now two function calls, each behind its own CASL check,
+rather than two downstream HTTP calls.
 
-**Exactly three routes skip JWT verification** (`@Public()`): `/auth/login`,
-`/auth/refresh`, and `/invitations/:token/accept` — because you cannot
-authenticate to authenticate, and an invitee accepting an invite has no account
-yet. Every other route, in every service, requires a verified identity — there is
-no fourth anonymous path anywhere in the system.
+**Exactly four route groups skip JWT verification** (they run `anonymous()`
+instead): `POST /auth/login`, `POST /auth/refresh`, `POST /onboarding/signup` and
+`POST /invitations/:token/accept` — because you cannot authenticate to
+authenticate, a new organisation has no account yet, and an invitee has no account
+yet. The two health probes are public too, and return booleans only. Every other
+route requires a verified identity (`backend/src/routes/index.ts` lists them).
 
 ---
 
 ## §3.5 (audit) — The trail is append-only because there's no way to write it any other way
 
-`audit-service` has **no write route at all** — check the controller, there is no
-`POST`. Every audit and security event arrives exclusively over Kafka
-(`apps/audit-service/src/events/*.consumer.ts`), consumed and stored. This is a
-structural choice, not a policy: a developer cannot "forget" to write an audit
-record through some other path, because no other path exists to write one through.
-Onboarding, plan-limit rejections, and any cross-tenant access attempt all publish
-events that land here — this is the "structured trace" the brief's §6 asks for,
-built as a Kafka consumer rather than a logging statement that could be skipped.
+There is **no write route** for audit data — the audit controller only lists.
+Every audit and security row is written by the in-process event sinks
+(`backend/src/events/handlers/audit-sink.handler.ts` and
+`security-events.handler.ts`), which receive every event published on the
+`organization/user/subscription/resource` and `security` channels. Onboarding,
+plan-limit rejections, and cross-tenant access attempts all publish events that land
+here.
+
+It is also append-only at the database level: `app_user` has only `SELECT, INSERT`
+on `audit_events` and `security_events` — no `UPDATE`, no `DELETE` — so even a bug
+in the application cannot rewrite history. Both tables are FORCE-RLS with a variant
+policy that admits NULL-org (platform-level) rows only while no org scope is set.
+
+Trade-off accepted with the move off Kafka: events are dispatched in-process after
+commit and a failed handler is logged and dropped (no retry, no DLQ). The request
+that produced the event never fails because of it.
 
 ---
 
@@ -290,7 +330,7 @@ partial failure must not block a retry or leave orphaned data.
 | Piece | File | What it does |
 |---|---|---|
 | Signup page | [`src/pages/signup/SignupPage.tsx`](frontend/src/pages/signup/SignupPage.tsx) | Form for org name + first admin's name/email/password. |
-| Zod schema | [`src/schemas/auth.ts`](frontend/src/schemas/auth.ts) → `signupSchema` | Mirrors `tenant-service`'s `SignupDto` validators field-for-field (min lengths, password ≥12 chars). |
+| Zod schema | [`src/schemas/auth.ts`](frontend/src/schemas/auth.ts) → `signupSchema` | Mirrors the backend's `SignupDto` (`backend/src/dtos/onboarding.dto.ts`) validators field-for-field (min lengths, password ≥12 chars). |
 | **The retry-safety mechanism** | `SignupPage.tsx` line 31 | `const [idempotencyKey] = useState<string>(generateIdempotencyKey);` |
 
 **How the retry-safety actually works, line by line:**
@@ -315,13 +355,15 @@ const result = await signup({ ...values, idempotencyKey }).catch(() => null);
 Why this matters for §3.2's "what happens if onboarding fails partway through":
 if the backend creates the organisation row but then crashes before creating the
 admin user, and you click "Create organisation" again, the **same key** arrives.
-`tenant-service` recognizes it as the same attempt (not a new signup) and resumes
+The backend (`services/onboarding.service.ts`) recognizes it as the same attempt (not a new signup) and resumes
 rather than creating a second, duplicate organisation. If the key regenerated on
 every submit, every retry would look like a brand-new signup attempt — which is
 exactly the "orphaned data" failure mode the brief calls out.
 
-The backend's own half is a saga table (`OnboardingSaga`) keyed on this same
-idempotency key — that part was already built before I started; the frontend's job
+The backend's own half is a saga table (`onboarding_sagas`) with a **unique**
+constraint on this same idempotency key — that constraint, not any cache, is what
+guarantees one saga per key. A failed step leaves the saga at the last step that
+succeeded and the retry resumes from there (forward recovery). The frontend's job
 was simply to generate the key once and hold it.
 
 ---
@@ -335,7 +377,7 @@ would each fit alone but together exceed the limit must not both succeed.
 ### What's built
 
 **The frontend does none of the actual enforcement** — that's a Postgres row lock
-in `subscription-service` (`SELECT … FOR UPDATE`), which predates my work and isn't
+on the `subscriptions` row (`SELECT … FOR UPDATE`, Part A), which predates my work and isn't
 something the client can see or influence. What the frontend *does* own:
 
 | Piece | File | What it does |
@@ -380,7 +422,7 @@ silently defeat the brief's requirement, so the code comment says so directly:
 
 This distinction matters for the walkthrough question in §7: *"a test proving the
 concurrency guarantee holds"* — that test lives in the backend (two simultaneous
-invite requests against `subscription-service`), not in this repo's frontend code,
+invite requests, in `backend/tests/integration/`), not in the frontend code,
 because the frontend has no way to *cause* concurrency to matter — it just displays
 whatever the server ends up saying.
 
@@ -407,7 +449,7 @@ users":** there is no code here that checks "is this user ID in my organisation?
 `usersApi.remove`) just sends the ID the admin clicked on. If that ID happened to
 belong to another organisation (which the UI can't even construct, since the list
 itself only ever shows the caller's own org's users), the request would come back
-**404** from `user-service`'s RLS — the exact same "does not exist" answer as the
+**404** from the backend's RLS — the exact same "does not exist" answer as the
 H1 case below. The comment in the hook says this outright:
 
 ```ts
@@ -432,9 +474,9 @@ resource by ID that happens to belong to a different organisation."*
 
 Tenant isolation is **not** a `WHERE organization_id = ...` clause anyone writes.
 It's PostgreSQL Row-Level Security (RLS): every tenant table has a policy that
-filters rows based on a session variable (`app.current_org`), set once per request
-from a **signed, HMAC'd internal header** that only `api-gateway` can produce (it's
-the only thing holding the JWT-to-internal-context signing secret). A developer
+filters rows based on a session variable (`app.current_org`), set once per
+transaction from the organisation in the **verified JWT** — and only
+`middlewares/authenticate.ts` ever turns a token into that context. A developer
 writing a brand-new, careless `SELECT * FROM resources` cannot bypass this — the
 database itself refuses to return rows for the wrong tenant, structurally, not by
 convention.
@@ -583,12 +625,19 @@ send, or even hold an `organizationId` as a request parameter. `SessionUser.orga
 (`src/types/api.ts`) exists purely for the frontend's own *rendering* decisions —
 which nav items to show, which route guard applies — never as something re-sent to
 the server. The server derives the real, trusted `organizationId` entirely from the
-verified JWT, at exactly one point (`api-gateway`'s JWT→internal-context translation,
+verified JWT, at exactly one point (`middlewares/authenticate.ts`,
 Part A), and the frontend has no path around that even if it wanted one.
 
 ---
 
 # Part C — Two real backend bugs found while wiring the frontend to it
+
+> **Historical.** Both bugs were in the original NestJS microservice backend
+> (`libs/tenant-context`, `libs/authorization`), which no longer exists. In the
+> Express monolith the equivalent code is `middlewares/authenticate.ts` (which opens
+> the ALS scope itself, so there is no middleware-before-guard ordering to get wrong)
+> and `lib/casl.ts` (which uses `createMongoAbility` from the start). The lessons
+> stand; the file paths below do not.
 
 I only found these because I actually clicked through the frontend and watched
 `/dashboard` and `/organizations/me` both 500. Neither was a frontend bug — both
@@ -642,13 +691,13 @@ rather than mocking the backend: **it found two production-blocking defects that
 
 | Check in the brief | What satisfies it |
 |---|---|
-| Bad input rejected before business logic | **Backend:** every DTO uses `class-validator` decorators (`@IsEmail`, `@MinLength`, etc.), validated by a global `ValidationPipe` before any handler runs. **Frontend:** every form uses a Zod schema mirroring that same DTO (`src/schemas/auth.ts`, `users.ts`, `resources.ts`) — a convenience only; the server validates independently, always |
-| No anonymous path beyond onboarding | **Backend:** exactly three `@Public()` routes system-wide (`/auth/login`, `/auth/refresh`, `/invitations/:token/accept`); every other route in every service requires a verified signed context. **Frontend:** `ROUTES` splits into `PublicOnlyRoute` vs `ProtectedRoute`/`TenantRoute`/`PlatformAdminRoute` |
+| Bad input rejected before business logic | **Backend:** every DTO uses `class-validator` decorators (`@IsEmail`, `@MinLength`, etc.), validated by the `validateBody` / `validateQuery` route middleware (`middlewares/validate.ts`, `whitelist` + `forbidNonWhitelisted`) before any controller runs. **Frontend:** every form uses a Zod schema mirroring that same DTO (`src/schemas/auth.ts`, `users.ts`, `resources.ts`) — a convenience only; the server validates independently, always |
+| No anonymous path beyond onboarding | **Backend:** exactly four public routes (`/auth/login`, `/auth/refresh`, `/onboarding/signup`, `/invitations/:token/accept`) plus the two boolean health probes; every other route requires a verified JWT. **Frontend:** `ROUTES` splits into `PublicOnlyRoute` vs `ProtectedRoute`/`TenantRoute`/`PlatformAdminRoute` |
 | The H1 test | **Backend:** RLS + `FORCE ROW LEVEL SECURITY` (Part A) is the actual enforcement. **Frontend:** `ResourceDetailPage.test.tsx` (3 tests) proves the client-visible behaviour |
-| The H2 concurrency test | `test/integration/user-service/seat-lock.integration.spec.ts` — 4 tests against a real PostgreSQL container, including the exact "two concurrent invites, one seat free" case and the §8 optional 50-concurrent-burst extension |
-| Lists stay usable as data grows | Keyset cursor pagination end to end: backend repositories return `{ items, nextCursor }` from an indexed `(organization_id, created_at DESC, id)` query, never a `COUNT(*)`; frontend's `useCursorPagination.ts` consumes it with Previous/Next only — no page numbers |
-| Structured trace for cross-tenant attempts | **Backend:** `audit-service` has no write route at all — every event arrives over Kafka, consumed and stored, so there's no path to skip writing one. **Frontend:** `AuditPage.tsx` (org's own trail) + `AdminSecurityPage.tsx` (platform-wide security events, metadata only) |
-| `docker compose up`, no manual setup | Backend: one-shot `migrator` container runs every service's migrations + seeds before any app service starts. Frontend: `frontend/Dockerfile` (pnpm build → nginx static serve) + the `frontend` service block in `docker-compose.yml`, now the system's eleventh container and second published port |
+| The H2 concurrency test | `backend/tests/integration/` — concurrent invite transactions against a real PostgreSQL container as `app_user`, plus the `CHECK`-constraint backstop |
+| Lists stay usable as data grows | Keyset cursor pagination end to end: backend models return `{ items, nextCursor }` from an indexed `(organization_id, created_at DESC, id)` query, never a `COUNT(*)`; frontend's `useCursorPagination.ts` consumes it with Previous/Next only — no page numbers |
+| Structured trace for cross-tenant attempts | **Backend:** there is no audit write route at all — every event reaches the in-process audit/security sinks, and `app_user` can only `SELECT`/`INSERT` the audit tables. **Frontend:** `AuditPage.tsx` (org's own trail) + `AdminSecurityPage.tsx` (platform-wide security events, metadata only) |
+| `docker compose up`, no manual setup | Backend: one-shot `migrator` container runs `prisma migrate deploy` + the platform-admin seed before the backend starts. Frontend: `frontend/Dockerfile` (pnpm build → nginx static serve) + the `frontend` service block in `docker-compose.yml` — four containers, two published ports |
 
 ---
 
@@ -658,10 +707,14 @@ rather than mocking the backend: **it found two production-blocking defects that
   resources whose foreign keys resolve to a different organisation than their
   owner) is not built — `resource_exists()` (Part A) is the *primitive* such a
   tool would use, but the tool itself doesn't exist yet.
-- I didn't touch `libs/database` or `libs/kafka` — whatever pre-existing DI
-  defect the README's "Known blocker" section describes there is separate from
-  the two bugs in Part C, which were in `libs/tenant-context` and
-  `libs/authorization`.
+- Event delivery is best-effort: in-process, after commit, no retry or DLQ. A
+  handler that throws (e.g. the audit insert for a non-UUID `x-correlation-id`) is
+  logged and dropped.
+- Rate limiting is per process — correct for the single-replica POC, N× too
+  generous with N replicas.
+- Behaviours intentionally carried over unchanged from the old stack (documented
+  follow-ups, not fixed in the rewrite) are listed in ARCHITECTURE.md's
+  "Current implementation" section.
 - Email delivery for invitations is stubbed (§8.2's `tokenForDev` — the raw
   invitation token is returned directly in the API response in development,
   rather than emailed) — a known, documented MVP shortcut, not something either

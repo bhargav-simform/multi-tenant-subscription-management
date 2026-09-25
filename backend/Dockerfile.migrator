@@ -1,20 +1,11 @@
 # syntax=docker/dockerfile:1
 #
-# The one-shot `migrator` container (§27.3). Runs every service's migrations as
-# app_migrator, seeds the platform admin, and EXITS — application services wait
-# on `condition: service_completed_successfully`, so no service ever races a
-# schema.
+# The one-shot `migrator` container: applies the Prisma migrations as app_migrator,
+# seeds the platform admin, and EXITS. The backend waits on
+# `condition: service_completed_successfully`, so it never races a schema.
 #
-# SINGLE STAGE, DELIBERATELY, unlike backend/Dockerfile. This image needs the
-# TypeScript SOURCES and devDependencies (ts-node, tsconfig-paths, typeorm's
-# CLI), because a migration file is run directly by the TypeORM CLI rather than
-# being part of any service's compiled bundle — `nest build` emits main.js and
-# what it imports, and nothing imports the migration classes at runtime
-# (migrationsRun is false in every service, by design: a running service
-# connects as app_user and has no DDL rights at all). Pruning to production
-# dependencies here would remove exactly the tooling this container exists to
-# run. It is also short-lived and never network-exposed, so image size and
-# attack surface matter far less than for the seven long-running services.
+# Single stage with dev dependencies on purpose: it runs the Prisma CLI and a
+# TypeScript seed script (tsx). Short-lived and never network-exposed.
 
 FROM node:22-alpine
 
@@ -24,20 +15,13 @@ RUN corepack enable && corepack prepare pnpm@10.32.1 --activate
 
 WORKDIR /app
 
-COPY backend/package.json backend/pnpm-lock.yaml backend/pnpm-workspace.yaml ./
-COPY backend/apps/api-gateway/package.json           apps/api-gateway/
-COPY backend/apps/auth-service/package.json          apps/auth-service/
-COPY backend/apps/tenant-service/package.json        apps/tenant-service/
-COPY backend/apps/user-service/package.json          apps/user-service/
-COPY backend/apps/subscription-service/package.json  apps/subscription-service/
-COPY backend/apps/resource-service/package.json      apps/resource-service/
-COPY backend/apps/audit-service/package.json         apps/audit-service/
-
+COPY backend/package.json backend/pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
 
-COPY backend/tsconfig.json backend/nest-cli.json ./
-COPY backend/libs ./libs
-COPY backend/apps ./apps
+COPY backend/tsconfig.json backend/prisma.config.ts ./
+COPY backend/prisma ./prisma
+COPY backend/src ./src
+RUN pnpm exec prisma generate
 
 COPY docker/migrator/run-migrations.sh /usr/local/bin/run-migrations.sh
 

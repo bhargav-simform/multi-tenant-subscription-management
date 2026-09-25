@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // ts-jest compiles with module CommonJS + node10 resolution, which ignores package
+    // `exports` — the only place @casl/ability declares its types. tsc (node16) does
+    // not need this; it only makes the same types visible to ts-jest.
+    "paths": {
+      "@casl/ability": ["./node_modules/@casl/ability/dist/types/index.d.ts"]
+    }
+  }
+}
